@@ -20,6 +20,7 @@ _REQUIRED_KEYS = (
 _DEFAULT_MAX_TOOL_CALLS = 5
 _DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 _DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+_DEFAULT_CHART_LOOKBACK_CANDLES = 30
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class Config:
     ctrader_account_id: int
     tavily_api_key: str
     max_tool_calls: int
+    chart_lookback_candles: int
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -52,4 +54,7 @@ class Config:
             ctrader_account_id=int(os.environ["CTRADER_ACCOUNT_ID"]),
             tavily_api_key=os.environ["TAVILY_API_KEY"],
             max_tool_calls=int(os.environ.get("MAX_TOOL_CALLS") or _DEFAULT_MAX_TOOL_CALLS),
+            chart_lookback_candles=int(
+                os.environ.get("CHART_LOOKBACK_CANDLES") or _DEFAULT_CHART_LOOKBACK_CANDLES
+            ),
         )

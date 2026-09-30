@@ -3,6 +3,11 @@ import pandas as pd
 _PAIRS = {"short": (8, 32), "medium": (16, 64), "long": (32, 128)}
 _BAND = 0.005
 
+# The distinct EMA spans behind _PAIRS, exposed so other deterministic tools
+# (e.g. the chart snapshot) reuse the same indicators instead of defining a
+# second, potentially-drifting set of periods.
+EMA_SPANS = sorted({span for pair in _PAIRS.values() for span in pair})
+
 
 def _classify(prices: pd.Series, fast_n: int, slow_n: int) -> dict:
     fast = prices.ewm(span=fast_n, adjust=False).mean()

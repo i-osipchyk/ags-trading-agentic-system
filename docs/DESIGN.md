@@ -44,6 +44,14 @@ need an exchange or paid vendor feed (CME/ICE settlement data); revisit after
 the 2-month review if this turns out to matter, same bucket as the other
 deferred items in `ARCHITECTURE.md`.
 
+**Chart description.** The analyst is also handed the latest N daily candles
+(raw OHLCV) plus their EMA values (same spans as `get_trend_state`) as a
+precomputed fact, not a tool — there's no parameter for the agent to choose,
+it's always "the latest N as of `as_of`," so a tool call would add nothing.
+N is `CHART_LOOKBACK_CANDLES` (env var, default 30). The agent's job is to
+turn that into a short narrative (`chart_description`), the same
+judgment-not-recomputation split as `seasonality_alignment`.
+
 **Output schema**
 
 | Field | Contents |
@@ -52,6 +60,7 @@ deferred items in `ARCHITECTURE.md`.
 | `volatility` | current vs. trailing average |
 | `seasonality_alignment` | typical or atypical for this calendar week |
 | `key_levels` | recent range, breakout points |
+| `chart_description` | narrative read of the latest N candles + EMAs |
 | `degraded` | bool — true if an underlying source hasn't updated since this analyst's last run, or a tool call failed/timed out |
 
 ## News analyst

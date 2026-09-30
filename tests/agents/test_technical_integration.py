@@ -25,9 +25,17 @@ def test_run_technical_analyst_standalone_run_for_corn_against_real_sources(tmp_
         commodity="corn",
         as_of=as_of,
         model=config.deepseek_model,
+        chart_lookback_candles=config.chart_lookback_candles,
     )
 
-    assert set(result.keys()) == {"trend", "volatility", "seasonality_alignment", "key_levels", "degraded"}
+    assert set(result.keys()) == {
+        "trend",
+        "volatility",
+        "seasonality_alignment",
+        "key_levels",
+        "chart_description",
+        "degraded",
+    }
     assert result["degraded"] is False
     assert set(result["trend"].keys()) == {"short", "medium", "long"}
     for timeframe in result["trend"].values():
@@ -36,3 +44,4 @@ def test_run_technical_analyst_standalone_run_for_corn_against_real_sources(tmp_
     assert result["volatility"]["trailing_average"] >= 0
     assert result["seasonality_alignment"]
     assert isinstance(result["key_levels"], dict)
+    assert result["chart_description"]

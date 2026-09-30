@@ -64,6 +64,8 @@ def test_run_technical_analyst_returns_schema_conformant_output_for_one_symbol(t
                     {
                         "seasonality_alignment": "typical",
                         "key_levels": {"recent_range": [4.40, 4.65], "breakout_points": [4.70]},
+                        "chart_description": "Price has grinded steadily higher over the last 30 sessions, "
+                        "holding above all EMAs with no material pullback.",
                     }
                 ),
                 "tool_calls": None,
@@ -79,9 +81,17 @@ def test_run_technical_analyst_returns_schema_conformant_output_for_one_symbol(t
         model="deepseek-chat",
         prices_client=prices_client,
         history_days=550,
+        chart_lookback_candles=30,
     )
 
-    assert set(result.keys()) == {"trend", "volatility", "seasonality_alignment", "key_levels", "degraded"}
+    assert set(result.keys()) == {
+        "trend",
+        "volatility",
+        "seasonality_alignment",
+        "key_levels",
+        "chart_description",
+        "degraded",
+    }
 
     # Trend/volatility are code-computed facts, not derived by the LLM.
     assert result["trend"] == {
@@ -97,8 +107,19 @@ def test_run_technical_analyst_returns_schema_conformant_output_for_one_symbol(t
     # Judgment-call fields come from the LLM's structured output.
     assert result["seasonality_alignment"] == "typical"
     assert result["key_levels"] == {"recent_range": [4.40, 4.65], "breakout_points": [4.70]}
+    assert result["chart_description"] == (
+        "Price has grinded steadily higher over the last 30 sessions, "
+        "holding above all EMAs with no material pullback."
+    )
 
     assert result["degraded"] is False
+
+    # The raw candle+EMA data (the chart "fact") must reach the prompt so
+    # the LLM has something to describe — not just be computed and dropped.
+    system_message = chat_client.calls[0]["messages"][0]
+    assert system_message["role"] == "system"
+    assert '"ema_8"' in system_message["content"]
+    assert bars[-1]["date"] in system_message["content"]
 
 
 def test_run_technical_analyst_surfaces_degraded_true_on_a_source_failure_instead_of_aborting(tmp_path):
@@ -108,7 +129,7 @@ def test_run_technical_analyst_surfaces_degraded_true_on_a_source_failure_instea
         responses=[
             {
                 "role": "assistant",
-                "content": json.dumps({"seasonality_alignment": "unknown", "key_levels": {}}),
+                "content": json.dumps({"seasonality_alignment": "unknown", "key_levels": {}, "chart_description": None}),
                 "tool_calls": None,
             }
         ]
@@ -127,3 +148,8 @@ def test_run_technical_analyst_surfaces_degraded_true_on_a_source_failure_instea
     assert result["degraded"] is True
     assert result["trend"] is None
     assert result["volatility"] is None
+
+    # No price history means no chart data to hand the LLM either — the
+    # system prompt should say so rather than silently omit it.
+    system_message = chat_client.calls[0]["messages"][0]
+    assert "unavailable" in system_message["content"]
