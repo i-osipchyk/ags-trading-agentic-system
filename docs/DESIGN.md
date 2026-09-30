@@ -33,8 +33,16 @@ Trend, volatility, and seasonality context. Trend and volatility are computed de
 | --- | --- |
 | `get_prices(symbol, start, end)` | Roll-adjusted OHLC |
 | `get_trend_state(symbol)` | Trend signal and its age (code-computed, not re-derived by the agent) |
-| `get_curve(symbol)` | Term structure / calendar spreads |
 | `get_seasonality(symbol)` | Historical seasonal pattern for this calendar week |
+
+**Correction to this version's tool list:** a `get_curve(symbol)` tool (term
+structure / calendar spreads) was originally planned here. Dropped — cTrader,
+a retail CFD broker, only exposes one continuous rolling instrument per
+commodity (plus cosmetic margin/swap-free variants), not multiple contract
+months, so there's no curve to compute from it. A real term structure would
+need an exchange or paid vendor feed (CME/ICE settlement data); revisit after
+the 2-month review if this turns out to matter, same bucket as the other
+deferred items in `ARCHITECTURE.md`.
 
 **Output schema**
 

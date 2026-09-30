@@ -168,6 +168,19 @@ class CTraderPricesClient:
         res = _do()
         return [_parse_bar(bar) for bar in res.trendbar]
 
+    def close(self) -> None:
+        """Tear down the connection. Must be called when done with a client
+        this object's own code constructed (see get_prices) — crochet gives
+        the whole process one shared reactor thread, and an un-closed
+        connection left running in the background is what makes a second
+        client's own handshake miss its 5s response timeout."""
+
+        @crochet.wait_for(timeout=self._timeout)
+        def _do():
+            return self._client.stopService()
+
+        _do()
+
 
 def get_prices(
     data_dir: Path,
@@ -193,10 +206,20 @@ def get_prices(
         day += timedelta(days=1)
 
     if missing_days:
+        owns_client = client is None
         if client is None:
             client = CTraderPricesClient(Config.from_env())
-        symbol_name = CTRADER_SYMBOL_NAMES[commodity]
-        fetched_bars = client.get_daily_bars(symbol_name, missing_days[0], missing_days[-1])
+        try:
+            symbol_name = CTRADER_SYMBOL_NAMES[commodity]
+            fetched_bars = client.get_daily_bars(symbol_name, missing_days[0], missing_days[-1])
+        finally:
+            # A client we constructed ourselves is ours to tear down — an
+            # injected client is the caller's, who may reuse it for further
+            # calls. Left open, it keeps running on crochet's one shared
+            # reactor thread and can make a later client's own handshake
+            # miss its response timeout (see CTraderPricesClient.close).
+            if owns_client:
+                client.close()
         fetched_by_date = {date.fromisoformat(bar["date"]): bar for bar in fetched_bars}
 
         for missing_day in missing_days:

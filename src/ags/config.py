@@ -18,11 +18,15 @@ _REQUIRED_KEYS = (
 )
 
 _DEFAULT_MAX_TOOL_CALLS = 5
+_DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+_DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
 
 
 @dataclass(frozen=True)
 class Config:
     deepseek_api_key: str
+    deepseek_base_url: str
+    deepseek_model: str
     ctrader_client_id: str
     ctrader_client_secret: str
     ctrader_access_token: str
@@ -40,6 +44,8 @@ class Config:
 
         return cls(
             deepseek_api_key=os.environ["DEEPSEEK_API_KEY"],
+            deepseek_base_url=os.environ.get("DEEPSEEK_BASE_URL") or _DEFAULT_DEEPSEEK_BASE_URL,
+            deepseek_model=os.environ.get("DEEPSEEK_MODEL") or _DEFAULT_DEEPSEEK_MODEL,
             ctrader_client_id=os.environ["CTRADER_CLIENT_ID"],
             ctrader_client_secret=os.environ["CTRADER_CLIENT_SECRET"],
             ctrader_access_token=os.environ["CTRADER_ACCESS_TOKEN"],

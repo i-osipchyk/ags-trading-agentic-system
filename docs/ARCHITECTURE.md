@@ -204,7 +204,7 @@ past calls against how they graded out, and adjust emphasis accordingly
 | Source | Used for | Integration pattern |
 | --- | --- | --- |
 | DeepSeek V4.1 Flash | All agents (model) | OpenAI-compatible API, hand-rolled loop |
-| cTrader Open API | `get_prices`, `get_curve` | Official Spotware Python SDK (Twisted-based), wrapped with `crochet` to expose an asyncio-facing interface; credentials via env vars the user provides |
+| cTrader Open API | `get_prices` | Official Spotware Python SDK (Twisted-based), wrapped with `crochet` to expose an asyncio-facing interface; credentials via env vars the user provides |
 | Tavily | News analyst search | LLM-shaped search API; free tier (1,000 credits/mo) comfortably covers worst-case usage (~140-280 credits/mo across the full commodity universe) |
 | USDA ESMIS archive | WASDE, Crop Progress, Export Sales | Scrape/parse the dated release archive directly — **not** PSD Online or NASS Quick Stats, both of which return latest-revised values rather than as-published figures |
 | UNICA / Conab / ISO | Sugar & Brazilian crop supply | Scrape/parse each body's public release archive into the PIT store, same pattern as ESMIS |
@@ -223,6 +223,16 @@ USDA/UNICA/Conab/ISO in both `CLAUDE.md` and the v2 design doc) does not
 map to a body we could confirm exists. Dropped from the source list rather
 than resolved to a guessed replacement; ICO/ICCO/ICAC cover coffee/cocoa/cotton
 instead, added per-commodity as needed.
+
+**Correction to the design doc's Technical analyst tools:** `get_curve`
+(term structure / calendar spreads, via cTrader) was dropped during Stage 6.
+Queried against the live account, cTrader's commodity symbol list has no
+multi-month contracts — one rolling instrument per commodity, plus
+margin/swap-free variants of that same instrument (`-F`, `_SB`, `_SBE`), not
+different expiries. A retail CFD broker has no reason to expose a futures
+ladder. Real term structure would need an exchange or paid vendor feed
+(CME/ICE settlement data); revisit after the 2-month review if it turns out
+to matter.
 
 ## Secrets and config
 
