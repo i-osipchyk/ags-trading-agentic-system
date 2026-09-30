@@ -7,6 +7,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "pandas>=2.2",
     "numpy>=1.26",
+    "ctrader-open-api>=0.9.2",
+    "crochet>=2.1",
 ]
 
 [dependency-groups]
@@ -23,3 +25,7 @@ packages = ["src/ags"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: hits a real external service with real credentials; excluded by default, run explicitly with -m integration",
+]
+addopts = "-m 'not integration'"

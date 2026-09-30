@@ -12,6 +12,8 @@ _REQUIRED_KEYS = (
     "DEEPSEEK_API_KEY",
     "CTRADER_CLIENT_ID",
     "CTRADER_CLIENT_SECRET",
+    "CTRADER_ACCESS_TOKEN",
+    "CTRADER_ACCOUNT_ID",
     "TAVILY_API_KEY",
 )
 
@@ -23,6 +25,8 @@ class Config:
     deepseek_api_key: str
     ctrader_client_id: str
     ctrader_client_secret: str
+    ctrader_access_token: str
+    ctrader_account_id: int
     tavily_api_key: str
     max_tool_calls: int
 
@@ -38,6 +42,8 @@ class Config:
             deepseek_api_key=os.environ["DEEPSEEK_API_KEY"],
             ctrader_client_id=os.environ["CTRADER_CLIENT_ID"],
             ctrader_client_secret=os.environ["CTRADER_CLIENT_SECRET"],
+            ctrader_access_token=os.environ["CTRADER_ACCESS_TOKEN"],
+            ctrader_account_id=int(os.environ["CTRADER_ACCOUNT_ID"]),
             tavily_api_key=os.environ["TAVILY_API_KEY"],
             max_tool_calls=int(os.environ.get("MAX_TOOL_CALLS") or _DEFAULT_MAX_TOOL_CALLS),
         )

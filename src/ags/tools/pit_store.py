@@ -14,3 +14,14 @@ def read_pit(data_dir: Path, *, source: str, report: str, symbol: str, as_of: da
 
     latest_file = max(qualifying_files, key=lambda f: date.fromisoformat(f.stem))
     return json.loads(latest_file.read_text())
+
+
+def write_pit(data_dir: Path, *, source: str, report: str, symbol: str, release_date: date, content: dict) -> bool:
+    dir_path = Path(data_dir) / source / report / symbol
+    file_path = dir_path / f"{release_date.isoformat()}.json"
+    if file_path.exists():
+        return False
+
+    dir_path.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(json.dumps(content))
+    return True
