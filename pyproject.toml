@@ -1,0 +1,25 @@
+[project]
+name = "ags"
+version = "0.1.0"
+description = "Ags Trading Analyst — multi-agent research pipeline for agricultural futures"
+requires-python = ">=3.12"
+dependencies = [
+    "python-dotenv>=1.0",
+    "pandas>=2.2",
+    "numpy>=1.26",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ags"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
