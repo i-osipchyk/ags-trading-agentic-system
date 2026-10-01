@@ -54,6 +54,19 @@ def run_loop(
 
     while True:
         cap_hit = tool_call_count >= max_tool_calls
+        if cap_hit:
+            # Observed against the real model: stripping the tools param
+            # alone isn't enough — a model that still wants to keep
+            # searching can ignore "JSON only" and emit its own
+            # pseudo-tool-call markup as content instead. Telling it plainly
+            # that no more tool calls are available fixes that.
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "No more tool calls are available. Respond now with the "
+                    "required JSON object, using only the tool results already gathered above.",
+                }
+            )
         response_message = client.complete(messages, None if cap_hit else tool_schemas, model=model)
         messages.append(response_message)
 
@@ -66,9 +79,19 @@ def run_loop(
             )
 
         for tool_call in tool_calls:
-            tool = tool_by_name[tool_call["function"]["name"]]
-            arguments = json.loads(tool_call["function"]["arguments"])
-            result = tool.function(**arguments)
+            # A single response can request several tool calls at once
+            # (parallel tool calling) — the cap must stop execution mid-batch,
+            # not just between turns, or a model that batches more calls than
+            # the cap blows straight past it in one turn. Every tool_call_id
+            # still gets a matching result message (the API requires one per
+            # call), even the ones capped out of actually running.
+            if tool_call_count >= max_tool_calls:
+                result = {"error": "tool_call_cap_hit: no further tool calls executed this run"}
+            else:
+                tool = tool_by_name[tool_call["function"]["name"]]
+                arguments = json.loads(tool_call["function"]["arguments"])
+                result = tool.function(**arguments)
+                tool_call_count += 1
             messages.append(
                 {
                     "role": "tool",
@@ -76,4 +99,3 @@ def run_loop(
                     "content": json.dumps(result),
                 }
             )
-            tool_call_count += 1
