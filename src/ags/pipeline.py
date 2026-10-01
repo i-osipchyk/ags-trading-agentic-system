@@ -13,6 +13,7 @@ from ags.llm.loop import ChatClient
 from ags.logging.run_id import generate_run_id
 from ags.logging.run_log import RunLog
 from ags.tools.sources.prices import get_prices
+from ags.tools.track_record import read_track_record
 
 
 class _SharedRunLog:
@@ -93,6 +94,7 @@ def run_pipeline(
     model: str,
     log_dir: Path,
     data_dir: Path,
+    audit_dir: Path | None = None,
     prices_client=None,
     news_client=None,
     weather_client=None,
@@ -136,6 +138,14 @@ def run_pipeline(
     for agent, output in outputs.items():
         run_log.append(agent=agent, event_type="output", payload=output)
 
+    track_record = None
+    if audit_dir is not None:
+        # Coordinator-only, and bounded by this run's own trigger so the
+        # current run (and anything later) never appears in its own record.
+        track_record = lambda lookback_weeks: read_track_record(  # noqa: E731
+            log_dir, audit_dir, commodity=commodity, lookback_weeks=lookback_weeks, as_of=trigger_timestamp
+        )
+
     try:
         call = run_coordinator(
             _client("coordinator"),
@@ -144,6 +154,7 @@ def run_pipeline(
             model=model,
             analyst_outputs=outputs,
             price_at_call=_price_at_call(data_dir, commodity, as_of, prices_client),
+            track_record=track_record,
         )
     except Exception as exc:
         call = {"call": None, "degraded": True, "error": f"{type(exc).__name__}: {exc}"}

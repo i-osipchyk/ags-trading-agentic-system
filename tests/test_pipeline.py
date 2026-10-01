@@ -261,3 +261,53 @@ def test_run_pipeline_leaves_price_at_call_empty_when_prices_are_unavailable(tmp
 
     assert result["call"]["price_at_call"] is None
     assert result["call"]["degraded"] is False
+
+
+def test_run_pipeline_gives_the_coordinator_its_past_calls_but_not_the_current_run(tmp_path):
+    past_id = "corn_2026-05-29T18-30-00Z"
+    past_call = {**_CANNED["Coordinator"], "call": "bullish", "price_at_call": None}
+    (tmp_path / "logs").mkdir()
+    RunLog(tmp_path / "logs", past_id).append(agent="coordinator", event_type="output", payload=past_call)
+    (tmp_path / "audits" / past_id).mkdir(parents=True)
+    (tmp_path / "audits" / past_id / "1w.json").write_text(
+        json.dumps(
+            {
+                "checkpoint_weeks": 1,
+                "direction_correct": True,
+                "driver_verdicts": [],
+                "calibration_note": "fine",
+                "thesis_vs_outcome": "matched",
+                "graded_at": "2026-06-05T12:00:00+00:00",
+            }
+        )
+    )
+    tool_call = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": "t1", "type": "function", "function": {"name": "read_track_record", "arguments": '{"lookback_weeks": 8}'}}
+        ],
+    }
+    final = {"role": "assistant", "content": json.dumps(_CANNED["Coordinator"]), "tool_calls": None}
+    client = RoutingChatClient({**_CANNED, "Coordinator": [tool_call, final]})
+
+    result = run_pipeline(
+        commodity="corn",
+        as_of=AS_OF,
+        trigger_timestamp=TRIGGER,
+        chat_client=client,
+        model="stub-model",
+        log_dir=tmp_path / "logs",
+        audit_dir=tmp_path / "audits",
+        data_dir=tmp_path / "data",
+        prices_client=FailingPricesClient(),
+        news_client=EmptyNewsClient(),
+    )
+
+    tool_results = [
+        m for e in _events(tmp_path, result["run_id"]) if e["agent"] == "coordinator" and e["event_type"] == "tool_result"
+        for m in [e["payload"]]
+    ]
+    [runs] = [json.loads(r["content"])["runs"] for r in tool_results]
+    assert [r["run_id"] for r in runs] == [past_id]
+    assert [a["checkpoint_weeks"] for a in runs[0]["audits"]] == [1]

@@ -108,3 +108,53 @@ def test_out_of_range_conviction_or_unknown_call_degrades():
     for result in (bad_conviction, bad_call, incomplete):
         assert result["degraded"] is True
         assert result["call"] is None
+
+
+class ScriptedChatClient:
+    def __init__(self, replies):
+        self._replies = list(replies)
+        self.calls = []
+
+    def complete(self, messages, tools, *, model):
+        self.calls.append({"messages": list(messages), "tools": tools})
+        return self._replies.pop(0)
+
+
+def test_coordinator_can_read_its_track_record_through_a_tool():
+    past = [{"run_id": "corn_2026-05-29T18-30-00Z", "call": "bullish", "audits": []}]
+    asked = []
+
+    def track_record(lookback_weeks):
+        asked.append(lookback_weeks)
+        return past
+
+    tool_call = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": "t1", "type": "function", "function": {"name": "read_track_record", "arguments": '{"lookback_weeks": 6}'}}
+        ],
+    }
+    final = {"role": "assistant", "content": json.dumps(FULL_AGREEMENT), "tool_calls": None}
+    client = ScriptedChatClient([tool_call, final])
+
+    result = run_coordinator(
+        client,
+        commodity="corn",
+        as_of=AS_OF,
+        model="stub-model",
+        analyst_outputs=ANALYST_OUTPUTS,
+        track_record=track_record,
+    )
+
+    assert [t["function"]["name"] for t in client.calls[0]["tools"]] == ["read_track_record"]
+    assert asked == [6]
+    tool_message = client.calls[1]["messages"][-1]
+    assert tool_message["role"] == "tool"
+    assert json.loads(tool_message["content"]) == {"runs": past}
+    assert result["call"] == "bullish"
+
+
+def test_coordinator_has_no_tools_without_a_track_record():
+    _, client = _call(FULL_AGREEMENT)
+    assert client.calls[0]["tools"] is None

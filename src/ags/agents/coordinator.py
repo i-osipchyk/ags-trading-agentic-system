@@ -1,7 +1,8 @@
 import json
 from datetime import date
+from typing import Callable
 
-from ags.llm.loop import ChatClient, run_loop
+from ags.llm.loop import ChatClient, ToolSpec, run_loop
 
 HORIZON = "1 week"
 
@@ -27,7 +28,14 @@ Respond with a JSON object containing exactly these fields:
   "thesis": short synthesis text
   "key_drivers": list of {{"driver": ..., "source": the analyst it came from}}
   "invalidation_conditions": list of what would prove the call wrong
-No other text — JSON only."""
+No other text — JSON only.
+
+If the read_track_record tool is available, you may call it to review your own
+past calls for {commodity} and how they graded out. Its data is variable-shaped:
+each past run lists only the audit checkpoints (1/2/4/8 weeks) that have been
+graded so far, so a run with no audits simply has not been graded yet — that is
+not a miss. Use it to weigh drivers that did or didn't play out, not to
+override this week's analyst evidence."""
 
 
 def _rubric_violations(conviction: int, supporting: list, dissenting: list) -> list[str]:
@@ -88,6 +96,7 @@ def run_coordinator(
     model: str,
     analyst_outputs: dict,
     price_at_call: dict | None = None,
+    track_record: Callable[[int], list[dict]] | None = None,
 ) -> dict:
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(commodity=commodity, as_of=as_of.isoformat(), horizon=HORIZON)
     user_prompt = (
@@ -95,8 +104,25 @@ def run_coordinator(
         + json.dumps(analyst_outputs, indent=2, default=str)
     )
 
+    tools = []
+    if track_record is not None:
+        tools.append(
+            ToolSpec(
+                name="read_track_record",
+                description="Your own past calls for this commodity, each with whichever audit checkpoints have been graded.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "lookback_weeks": {"type": "integer", "description": "How many weeks back to read."}
+                    },
+                    "required": ["lookback_weeks"],
+                },
+                function=lambda lookback_weeks: {"runs": track_record(lookback_weeks)},
+            )
+        )
+
     loop_result = run_loop(
-        chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=[]
+        chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
     try:
         parsed = json.loads(loop_result.content)

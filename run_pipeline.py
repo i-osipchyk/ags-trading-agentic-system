@@ -32,6 +32,7 @@ def main(argv: list[str] | None = None) -> None:
         chat_client=DeepSeekChatClient(config),
         model=config.deepseek_model,
         log_dir=_ROOT / "logs",
+        audit_dir=_ROOT / "audits",
         data_dir=_ROOT / "data",
     )
 
