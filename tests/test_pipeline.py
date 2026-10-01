@@ -17,6 +17,15 @@ _CANNED = {
     "News analyst": {"headlines": []},
     "Weather/season analyst": {"regions_covered": [], "current_conditions": {}, "risk_assessment": {}},
     "Supply/demand analyst": {"latest_report": None, "key_figures": [], "stocks_to_use": None},
+    "Coordinator": {
+        "call": "neutral",
+        "conviction": 1,
+        "supporting_analysts": [],
+        "dissenting_analysts": [],
+        "thesis": "No fresh evidence.",
+        "key_drivers": [],
+        "invalidation_conditions": [],
+    },
 }
 
 
@@ -127,13 +136,15 @@ def test_run_pipeline_gives_every_analyst_the_same_as_of(tmp_path):
 
     prompts = [e for e in _events(tmp_path, result["run_id"]) if e["event_type"] == "prompt"]
 
-    assert len(prompts) == 4
-    for event in prompts:
+    analyst_prompts = [e for e in prompts if e["agent"] != "coordinator"]
+    assert len(analyst_prompts) == 4
+    for event in analyst_prompts:
         assert "2026-06-05" in event["payload"]["messages"][0]["content"]
 
 
 def test_run_pipeline_keeps_analysts_blind_to_each_others_output(tmp_path):
     replies = {
+        **_CANNED,
         "Technical analyst": {**_CANNED["Technical analyst"], "chart_description": "MARKER-TECH"},
         "News analyst": {"headlines": [{"headline": "MARKER-NEWS"}]},
         "Weather/season analyst": {**_CANNED["Weather/season analyst"], "current_conditions": {"IA": "MARKER-WX"}},
@@ -144,7 +155,7 @@ def test_run_pipeline_keeps_analysts_blind_to_each_others_output(tmp_path):
     result = _run(tmp_path, RoutingChatClient(replies))
 
     for event in _events(tmp_path, result["run_id"]):
-        if event["event_type"] in ("prompt", "tool_call", "tool_result"):
+        if event["agent"] != "coordinator" and event["event_type"] in ("prompt", "tool_call", "tool_result"):
             text = json.dumps(event["payload"])
             for owner, marker in markers.items():
                 if owner != event["agent"]:
@@ -169,3 +180,84 @@ def test_run_pipeline_records_a_crashed_analyst_as_degraded_and_finishes_the_oth
         if e["agent"] == "technical" and e["event_type"] == "output"
     ]
     assert technical_outputs[0]["payload"] == result["outputs"]["technical"]
+
+
+def test_run_pipeline_returns_the_coordinators_call_and_logs_it(tmp_path):
+    result = _run(tmp_path)
+
+    assert result["call"]["call"] == "neutral"
+    assert result["call"]["horizon"] == "1 week"
+    assert result["call"]["degraded"] is False
+    coordinator_events = [e for e in _events(tmp_path, result["run_id"]) if e["agent"] == "coordinator"]
+    assert [e["event_type"] for e in coordinator_events] == ["prompt", "output"]
+    assert coordinator_events[1]["payload"] == result["call"]
+
+
+def test_run_pipeline_feeds_the_coordinator_exactly_the_four_analyst_outputs(tmp_path):
+    replies = {**_CANNED, "News analyst": {"headlines": [{"headline": "MARKER-NEWS"}]}}
+
+    result = _run(tmp_path, RoutingChatClient(replies))
+
+    events = _events(tmp_path, result["run_id"])
+    coordinator_prompt = json.dumps(next(e for e in events if e["agent"] == "coordinator" and e["event_type"] == "prompt")["payload"])
+    assert "MARKER-NEWS" in coordinator_prompt
+    # The coordinator runs after the fan-out: no analyst prompt may contain its output.
+    last_analyst_output = max(e["seq"] for e in events if e["event_type"] == "output" and e["agent"] != "coordinator")
+    first_coordinator = min(e["seq"] for e in events if e["agent"] == "coordinator")
+    assert first_coordinator > last_analyst_output
+
+
+def test_run_pipeline_records_a_crashed_coordinator_as_a_degraded_call(tmp_path):
+    class GarbageCoordinatorClient(RoutingChatClient):
+        def complete(self, messages, tools, *, model):
+            if "Coordinator" in messages[0]["content"]:
+                raise RuntimeError("model unavailable")
+            return super().complete(messages, tools, model=model)
+
+    result = _run(tmp_path, GarbageCoordinatorClient())
+
+    assert result["call"]["degraded"] is True
+    assert result["call"]["call"] is None
+    assert "model unavailable" in result["call"]["error"]
+    assert result["outputs"]["news"] == {"headlines": [], "degraded": False}
+
+
+class WeekdayPricesClient:
+    """Serves a flat 4.00 close on every weekday, except 5.25 on the as-of day."""
+
+    def get_daily_bars(self, symbol_name, start, end):
+        from datetime import timedelta
+
+        bars = []
+        day = start
+        while day <= end:
+            if day.weekday() < 5:
+                close = 5.25 if day == AS_OF else 4.0
+                bars.append(
+                    {"date": day.isoformat(), "open": close, "high": close, "low": close, "close": close, "volume": 1}
+                )
+            day += timedelta(days=1)
+        return bars
+
+
+def test_run_pipeline_stamps_the_call_with_the_as_of_close_from_code_not_the_model(tmp_path):
+    result = run_pipeline(
+        commodity="corn",
+        as_of=AS_OF,
+        trigger_timestamp=TRIGGER,
+        chat_client=RoutingChatClient(),
+        model="stub-model",
+        log_dir=tmp_path / "logs",
+        data_dir=tmp_path / "data",
+        prices_client=WeekdayPricesClient(),
+        news_client=EmptyNewsClient(),
+    )
+
+    assert result["call"]["price_at_call"] == {"price": 5.25, "date": "2026-06-05"}
+
+
+def test_run_pipeline_leaves_price_at_call_empty_when_prices_are_unavailable(tmp_path):
+    result = _run(tmp_path)  # FailingPricesClient
+
+    assert result["call"]["price_at_call"] is None
+    assert result["call"]["degraded"] is False

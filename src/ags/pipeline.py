@@ -1,9 +1,10 @@
 import asyncio
 import json
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from ags.agents.coordinator import run_coordinator
 from ags.agents.news import run_news_analyst
 from ags.agents.supply_demand import run_supply_demand_analyst
 from ags.agents.technical import run_technical_analyst
@@ -11,6 +12,7 @@ from ags.agents.weather import run_weather_analyst
 from ags.llm.loop import ChatClient
 from ags.logging.run_id import generate_run_id
 from ags.logging.run_log import RunLog
+from ags.tools.sources.prices import get_prices
 
 
 class _SharedRunLog:
@@ -68,6 +70,20 @@ class LoggingChatClient:
         self._run_log.append(agent=self._agent, event_type=event_type, payload=payload)
 
 
+def _price_at_call(data_dir: Path, commodity: str, as_of: date, prices_client) -> dict | None:
+    # Deterministic fact, stamped by code — never asked of the model. A week
+    # lookback spans weekends/holidays so the latest trading close is found.
+    try:
+        bars = get_prices(
+            data_dir, commodity=commodity, start=as_of - timedelta(days=7), end=as_of, as_of=as_of, client=prices_client
+        )
+    except Exception:
+        return None
+    if not bars:
+        return None
+    return {"price": bars[-1]["close"], "date": bars[-1]["date"]}
+
+
 def run_pipeline(
     *,
     commodity: str,
@@ -119,4 +135,17 @@ def run_pipeline(
     outputs = dict(zip(analysts, asyncio.run(_fan_out())))
     for agent, output in outputs.items():
         run_log.append(agent=agent, event_type="output", payload=output)
-    return {"run_id": run_id, "outputs": outputs}
+
+    try:
+        call = run_coordinator(
+            _client("coordinator"),
+            commodity=commodity,
+            as_of=as_of,
+            model=model,
+            analyst_outputs=outputs,
+            price_at_call=_price_at_call(data_dir, commodity, as_of, prices_client),
+        )
+    except Exception as exc:
+        call = {"call": None, "degraded": True, "error": f"{type(exc).__name__}: {exc}"}
+    run_log.append(agent="coordinator", event_type="output", payload=call)
+    return {"run_id": run_id, "outputs": outputs, "call": call}

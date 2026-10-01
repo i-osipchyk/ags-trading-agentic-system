@@ -1,7 +1,7 @@
 """CLI: trigger one weekly pipeline run for a commodity.
 
-Stage 8 — fans out the four analysts and prints their raw outputs. No
-coordinator yet.
+Fans out the four analysts, then the coordinator synthesizes them into one
+call. Prints the raw analyst outputs and the final call.
 """
 
 import argparse
@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> None:
     for agent, output in result["outputs"].items():
         print(f"\n== {agent} ==")
         print(json.dumps(output, indent=2))
+    print("\n== call ==")
+    print(json.dumps(result["call"], indent=2))
 
 
 if __name__ == "__main__":
