@@ -44,13 +44,14 @@ src/ags/
       # ico.py / iccо.py / icac.py added lazily, per commodity, as needed
   llm/               # hand-rolled tool-calling loop, model-agnostic client
   logging/           # run_id generation, JSONL writer/reader
-  ui/                # Streamlit chat interface (answer_question + render_chat_page)
+  ui/                # Streamlit app: runs grid + job control (runs, jobs, runs_page), chat (chat, streamlit_app)
 run_pipeline.py       # CLI: trigger a weekly run
-run_auditor.py         # CLI: manually trigger due checkpoint evaluations
+run_auditor.py         # CLI: trigger due checkpoint evaluations (all, or one via --run-id/--weeks)
 tests/
   tools/               # PIT fixture-based unit tests
 data/                   # PIT store contents (gitignored)
 logs/                    # run JSONL logs (gitignored)
+jobs/                    # UI job lock, output tail, exit code (gitignored)
 audits/                  # audit JSON files (gitignored)
 .env / .env.example
 ```
@@ -152,6 +153,21 @@ call (its tool allowlist) — never the tool implementation itself, so the
   Streamlit session state only and is never written to the run log or the
   audited record. The logic lives in `ags.ui.chat.answer_question` (UI-agnostic)
   and `ags.ui.streamlit_app.render_chat_page`.
+- **Runs page and job control:** the app's default page is a grid of runs
+  (filter by commodity and trigger date) with one cell per audit checkpoint:
+  yellow = not yet due, red = due and ungraded, green = graded (✓/✗/– for
+  `direction_correct`), grey = run has no call. Clicking a run opens the chat
+  page. The page can also trigger work, but the **CLI remains the trigger**:
+  buttons spawn `run_pipeline.py` / `run_auditor.py` as detached subprocesses
+  (no queue, no worker). Exactly one job runs at a time, tracked in
+  `jobs/current.json` (pid, label, start time; a dead pid is a stale lock) with
+  output in `jobs/output.log` and the exit code in `jobs/exit_code`; "run all"
+  runs the commodities sequentially. UI runs never pass `--as-of`, so backtests
+  stay CLI-only. A run triggered on anything but a Friday (ET) is flagged
+  off-cadence; weekend single runs and the bulk actions ("run all", "grade all
+  due") require a confirmation click. Logic lives in `ags.ui.runs`
+  (`build_grid`) and `ags.ui.jobs` (cadence, locking, command builders);
+  `ags.ui.runs_page` is rendering only.
 
 ## Auditor
 

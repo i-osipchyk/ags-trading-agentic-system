@@ -56,6 +56,23 @@ def test_a_checkpoint_falling_exactly_at_now_is_due(tmp_path):
     assert due == [("corn_2026-06-16T18-30-00Z", 1), ("corn_2026-06-16T18-30-00Z", 2)]
 
 
+def test_only_restricts_due_checkpoints_to_a_single_run_and_horizon(tmp_path):
+    log_dir, audit_dir = _dirs(tmp_path)
+    _write_run(log_dir, "corn_2026-05-01T18-30-00Z")
+    _write_run(log_dir, "wheat_2026-05-01T18-30-00Z")
+
+    due = find_due_checkpoints(log_dir, audit_dir, now=NOW, only=("wheat_2026-05-01T18-30-00Z", 2))
+
+    assert due == [("wheat_2026-05-01T18-30-00Z", 2)]
+
+
+def test_only_never_makes_a_not_yet_due_checkpoint_due(tmp_path):
+    log_dir, audit_dir = _dirs(tmp_path)
+    _write_run(log_dir, "corn_2026-06-16T18-30-00Z")  # 4w not elapsed at NOW
+
+    assert find_due_checkpoints(log_dir, audit_dir, now=NOW, only=("corn_2026-06-16T18-30-00Z", 4)) == []
+
+
 def test_runs_without_a_gradable_call_and_stray_files_are_ignored(tmp_path):
     log_dir, audit_dir = _dirs(tmp_path)
     _write_run(log_dir, "corn_2026-05-01T18-30-00Z", call=None)  # degraded coordinator

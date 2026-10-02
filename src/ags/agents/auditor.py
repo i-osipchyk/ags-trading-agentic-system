@@ -52,7 +52,9 @@ def _outputs(log_path: Path) -> dict[str, dict]:
     return outputs
 
 
-def find_due_checkpoints(log_dir: Path, audit_dir: Path, *, now: datetime) -> list[tuple[str, int]]:
+def find_due_checkpoints(
+    log_dir: Path, audit_dir: Path, *, now: datetime, only: tuple[str, int] | None = None
+) -> list[tuple[str, int]]:
     due = []
     for log_path in sorted(Path(log_dir).glob("*.jsonl")):
         triggered = _triggered_at(log_path.stem)
@@ -63,6 +65,8 @@ def find_due_checkpoints(log_dir: Path, audit_dir: Path, *, now: datetime) -> li
             continue
         for weeks in CHECKPOINT_WEEKS:
             graded = Path(audit_dir, log_path.stem, f"{weeks}w.json").exists()
+            if only is not None and only != (log_path.stem, weeks):
+                continue
             if triggered + timedelta(weeks=weeks) <= now and not graded:
                 due.append((log_path.stem, weeks))
     return due
@@ -180,9 +184,10 @@ def run_auditor(
     model: str,
     now: datetime,
     prices_client: PricesClient | None = None,
+    only: tuple[str, int] | None = None,
 ) -> dict:
     graded, failed = [], []
-    for run_id, weeks in find_due_checkpoints(log_dir, audit_dir, now=now):
+    for run_id, weeks in find_due_checkpoints(log_dir, audit_dir, now=now, only=only):
         try:
             audit = grade_checkpoint(
                 chat_client,

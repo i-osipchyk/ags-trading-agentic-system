@@ -1,17 +1,17 @@
 """CLI: trigger one weekly pipeline run for a commodity.
 
 Fans out the four analysts, then the coordinator synthesizes them into one
-call. Prints the raw analyst outputs and the final call.
+call. Prints the final call and the analyst outputs as readable text.
 """
 
 import argparse
-import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 from ags.config import Config
 from ags.llm.deepseek_client import DeepSeekChatClient
 from ags.pipeline import run_pipeline
+from ags.ui.format import to_markdown
 
 _ROOT = Path(__file__).parent
 
@@ -37,11 +37,11 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     print(f"run_id: {result['run_id']}")
+    print("\n== call ==")
+    print(to_markdown(result["call"]))
     for agent, output in result["outputs"].items():
         print(f"\n== {agent} ==")
-        print(json.dumps(output, indent=2))
-    print("\n== call ==")
-    print(json.dumps(result["call"], indent=2))
+        print(to_markdown(output))
 
 
 if __name__ == "__main__":

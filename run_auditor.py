@@ -8,7 +8,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ags.agents.auditor import run_auditor
+from ags.agents.auditor import CHECKPOINT_WEEKS, run_auditor
 from ags.config import Config
 from ags.llm.deepseek_client import DeepSeekChatClient
 
@@ -16,7 +16,12 @@ _ROOT = Path(__file__).parent
 
 
 def main(argv: list[str] | None = None) -> None:
-    argparse.ArgumentParser(description="Grade all due audit checkpoints.").parse_args(argv)
+    parser = argparse.ArgumentParser(description="Grade all due audit checkpoints, or just one.")
+    parser.add_argument("--run-id", help="grade only this run's checkpoint (requires --weeks)")
+    parser.add_argument("--weeks", type=int, choices=CHECKPOINT_WEEKS, help="the checkpoint horizon (requires --run-id)")
+    args = parser.parse_args(argv)
+    if (args.run_id is None) != (args.weeks is None):
+        parser.error("--run-id and --weeks must be given together")
 
     config = Config.from_env()
     result = run_auditor(
@@ -26,6 +31,7 @@ def main(argv: list[str] | None = None) -> None:
         data_dir=_ROOT / "data",
         model=config.deepseek_model,
         now=datetime.now(timezone.utc),
+        only=(args.run_id, args.weeks) if args.run_id else None,
     )
 
     for run_id, weeks in result["graded"]:

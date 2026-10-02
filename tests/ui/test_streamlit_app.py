@@ -49,7 +49,7 @@ def _text(app):
 
 def test_runs_are_listed_newest_first_and_newest_is_selected(app):
     assert not app.exception
-    assert list(app.sidebar.selectbox[0].options) == [NEW, OLD]
+    assert list(app.sidebar.selectbox[0].options) == ["Wheat 2026-09-08 15:00 UTC", "Corn 2026-09-01 15:00 UTC"]
     assert app.sidebar.selectbox[0].value == NEW
     assert "NEW-THESIS" in _text(app)
     assert "bearish" in _text(app).lower()
