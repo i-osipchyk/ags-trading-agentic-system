@@ -1,9 +1,11 @@
+import io
 import re
 import xml.etree.ElementTree as ET
 from datetime import date, timedelta
 from typing import Protocol
 
 import requests
+from pypdf import PdfReader
 
 from ags.tools.pit_store import read_pit, write_pit
 
@@ -16,12 +18,33 @@ _WASDE_LISTING = _ESMIS_BASE + "/publication/world-agricultural-supply-and-deman
 _MAX_LISTING_PAGES = 10
 
 # (sub-report, matrix index) of each commodity's U.S. supply/use table in the
-# WASDE XML; all three are in million bushels (wheat, corn, soybeans).
-_WASDE_TABLES = {"wheat": ("sr11", 0), "corn": ("sr12", 1), "soybeans": ("sr15", 0)}
+# WASDE XML. Units differ per commodity (million bushels for wheat/corn/soybeans,
+# million bales for cotton, 1,000 short tons for sugar); only stocks-to-use is comparable across them.
+_WASDE_TABLES = {"wheat": ("sr11", 0), "corn": ("sr12", 1), "soybeans": ("sr15", 0), "cotton": ("sr17", 0), "sugar": ("sr16", 0)}
+
+# The sugar table labels its total-use row differently from the grain/cotton tables.
+_TOTAL_USE_ALIASES = {"total use": "use, total"}
 
 _RELEASE_RE = re.compile(
     r'href="(/sites/default/release-files/\d+/wasde[^"]*\.xml)"[^>]*>\s*<span[^>]*>\s*(?:[^<]*?)<time datetime="(\d{4}-\d{2}-\d{2})'
 )
+
+
+# FAS "Coffee: World Markets and Trade" — semiannual PDF on ESMIS, world totals only.
+_COFFEE_LISTING = _ESMIS_BASE + "/publication/coffee-world-markets-and-trade"
+_COFFEE_RELEASE_RE = re.compile(
+    r'href="(/sites/default/release-files/[^"]*coffee\.pdf)"[^>]*>\s*<span[^>]*>\s*<time datetime="(\d{4}-\d{2}-\d{2})'
+)
+_YEAR_RE = re.compile(r"\b\d{4}/\d{2}\b")
+_TOTAL_ROW_RE = re.compile(r"^\s*[\d,]*\s*Total\s+([\d,\s]+)$")
+
+
+# The report each commodity's balance sheet comes from; WASDE unless listed.
+_REPORT_BY_SYMBOL = {"coffee": "coffee_world_markets"}
+
+
+def report_for_symbol(symbol: str) -> str:
+    return _REPORT_BY_SYMBOL.get(symbol, "wasde")
 
 
 class UsdaClient(Protocol):
@@ -53,6 +76,7 @@ def _parse_wasde(xml_bytes: bytes, symbol: str) -> dict | None:
         if attr is None:
             continue
         name = " ".join(attr.split()).lower()
+        name = _TOTAL_USE_ALIASES.get(name, name)
         if name in ("ending stocks", "use, total") and _row_cells(element):
             # The last cell is the newest marketing year's most recent forecast month.
             figures[name] = _row_cells(element)[-1]
@@ -68,6 +92,36 @@ def _parse_wasde(xml_bytes: bytes, symbol: str) -> dict | None:
     }
 
 
+def _parse_coffee(pdf_bytes: bytes) -> dict | None:
+    lines = []
+    for page in PdfReader(io.BytesIO(pdf_bytes)).pages:
+        lines.extend((page.extract_text() or "").splitlines())
+
+    marketing_year = None
+    section = None
+    totals = {}
+    for line in lines:
+        if "Domestic Consumption" in line:
+            section = "use"
+        elif "Ending Stocks" in line:
+            section = "ending_stocks"
+        elif section is None:
+            years = _YEAR_RE.findall(line)
+            if years:
+                marketing_year = years[-1]
+        elif section not in totals and (match := _TOTAL_ROW_RE.match(line)):
+            # The newest marketing year is the last column of the world Total row.
+            totals[section] = float(match.group(1).split()[-1].replace(",", ""))
+
+    if marketing_year is None or "use" not in totals or "ending_stocks" not in totals:
+        return None
+    return {
+        "marketing_year": marketing_year,
+        "ending_stocks": totals["ending_stocks"],
+        "stocks_to_use": round(totals["ending_stocks"] / totals["use"] * 100, 2),
+    }
+
+
 class EsmisClient:
     """USDA ESMIS archive of as-released WASDE XML (esmis.nal.usda.gov) — not PSD Online."""
 
@@ -79,7 +133,25 @@ class EsmisClient:
             seen[path] = date.fromisoformat(day)
         return [(d, p) for p, d in seen.items()]
 
+    def _coffee_release(self, as_of: date) -> dict | None:
+        response = requests.get(_COFFEE_LISTING, timeout=30)
+        response.raise_for_status()
+        eligible = [
+            (date.fromisoformat(day), path)
+            for path, day in _COFFEE_RELEASE_RE.findall(response.text)
+            if date.fromisoformat(day) <= as_of
+        ]
+        if not eligible:
+            return None
+        release_date, path = max(eligible)
+        response = requests.get(_ESMIS_BASE + path, timeout=120)
+        response.raise_for_status()
+        parsed = _parse_coffee(response.content)
+        return None if parsed is None else {"release_date": release_date.isoformat(), **parsed}
+
     def get_report(self, report: str, symbol: str, *, as_of: date) -> dict | None:
+        if report == "coffee_world_markets" and symbol == "coffee":
+            return self._coffee_release(as_of)
         if report != "wasde" or symbol not in _WASDE_TABLES:
             return None
 
@@ -139,7 +211,9 @@ def get_usda_report(data_dir, *, report: str, symbol: str, as_of: date, client: 
 
 
 def get_balance_sheet_revisions(data_dir, *, symbol: str, as_of: date, client: UsdaClient) -> dict:
-    result = get_usda_report(data_dir, report="wasde", symbol=symbol, as_of=as_of, client=client)
+    result = get_usda_report(
+        data_dir, report=report_for_symbol(symbol), symbol=symbol, as_of=as_of, client=client
+    )
     change = result.get("change")
     if change is None:
         return {"symbol": symbol, "ending_stocks_change": None, "stocks_to_use_change": None, "stocks_to_use_trend": None}

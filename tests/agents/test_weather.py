@@ -146,7 +146,7 @@ def test_run_weather_analyst_surfaces_degraded_true_when_the_model_returns_unpar
     as_of = date(2026, 10, 1)
 
     chat_client = FakeChatClient(
-        responses=[{"role": "assistant", "content": "not valid json", "tool_calls": None}]
+        responses=[{"role": "assistant", "content": "not valid json", "tool_calls": None}] * 2
     )
 
     result = run_weather_analyst(

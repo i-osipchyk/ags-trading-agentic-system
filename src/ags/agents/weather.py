@@ -1,7 +1,7 @@
 import json
 from datetime import date
 
-from ags.llm.loop import ChatClient, ToolSpec, run_loop
+from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.growing_calendar import get_growing_calendar as compute_growing_calendar
 from ags.tools.sources.weather import SUPPORTED_REGIONS, WeatherClient
 from ags.tools.sources.weather import get_weather as fetch_weather
@@ -69,7 +69,7 @@ def run_weather_analyst(
     )
     user_prompt = f"Assess weather/season conditions for {commodity} as of {as_of.isoformat()}."
 
-    loop_result = run_loop(
+    loop_result = run_json_loop(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
 

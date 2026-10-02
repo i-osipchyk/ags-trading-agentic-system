@@ -125,10 +125,30 @@ def test_run_pipeline_logs_each_tool_call_and_its_result_in_order(tmp_path):
     result = _run(tmp_path, RoutingChatClient(replies))
 
     news_events = [e for e in _events(tmp_path, result["run_id"]) if e["agent"] == "news"]
-    assert [e["event_type"] for e in news_events] == ["prompt", "tool_call", "tool_result", "output"]
-    assert news_events[1]["payload"] == {"id": "call_1", "name": "search_news", "arguments": {"query": "corn futures news"}}
-    assert news_events[2]["payload"]["tool_call_id"] == "call_1"
-    assert json.loads(news_events[2]["payload"]["content"]) == {"results": []}
+    assert [e["event_type"] for e in news_events] == [
+        "prompt",
+        "response",
+        "tool_call",
+        "tool_result",
+        "response",
+        "output",
+    ]
+    assert news_events[2]["payload"] == {"id": "call_1", "name": "search_news", "arguments": {"query": "corn futures news"}}
+    assert news_events[3]["payload"]["tool_call_id"] == "call_1"
+    assert json.loads(news_events[3]["payload"]["content"]) == {"results": []}
+
+
+def test_run_pipeline_logs_the_models_raw_final_reply_even_when_it_is_not_valid_json(tmp_path):
+    raw = "Here are the headlines I found: none."
+    replies = dict(_CANNED)
+    replies["News analyst"] = [{"role": "assistant", "content": raw, "tool_calls": None}]
+
+    result = _run(tmp_path, RoutingChatClient(replies))
+
+    news_events = [e for e in _events(tmp_path, result["run_id"]) if e["agent"] == "news"]
+    responses = [e for e in news_events if e["event_type"] == "response"]
+    assert [e["payload"]["content"] for e in responses] == [raw]
+    assert result["outputs"]["news"]["degraded"] is True
 
 
 def test_run_pipeline_gives_every_analyst_the_same_as_of(tmp_path):
@@ -163,13 +183,13 @@ def test_run_pipeline_keeps_analysts_blind_to_each_others_output(tmp_path):
 
 
 def test_run_pipeline_records_a_crashed_analyst_as_degraded_and_finishes_the_others(tmp_path):
-    class GarbageTechnicalClient(RoutingChatClient):
+    class CrashingTechnicalClient(RoutingChatClient):
         def complete(self, messages, tools, *, model):
             if "Technical analyst" in messages[0]["content"]:
-                return {"role": "assistant", "content": "not json", "tool_calls": None}
+                raise RuntimeError("model endpoint unavailable")
             return super().complete(messages, tools, model=model)
 
-    result = _run(tmp_path, GarbageTechnicalClient())
+    result = _run(tmp_path, CrashingTechnicalClient())
 
     assert result["outputs"]["technical"]["degraded"] is True
     assert "error" in result["outputs"]["technical"]
@@ -189,8 +209,8 @@ def test_run_pipeline_returns_the_coordinators_call_and_logs_it(tmp_path):
     assert result["call"]["horizon"] == "1 week"
     assert result["call"]["degraded"] is False
     coordinator_events = [e for e in _events(tmp_path, result["run_id"]) if e["agent"] == "coordinator"]
-    assert [e["event_type"] for e in coordinator_events] == ["prompt", "output"]
-    assert coordinator_events[1]["payload"] == result["call"]
+    assert [e["event_type"] for e in coordinator_events] == ["prompt", "response", "output"]
+    assert coordinator_events[2]["payload"] == result["call"]
 
 
 def test_run_pipeline_feeds_the_coordinator_exactly_the_four_analyst_outputs(tmp_path):

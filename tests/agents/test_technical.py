@@ -153,3 +153,52 @@ def test_run_technical_analyst_surfaces_degraded_true_on_a_source_failure_instea
     # system prompt should say so rather than silently omit it.
     system_message = chat_client.calls[0]["messages"][0]
     assert "unavailable" in system_message["content"]
+
+
+def test_run_technical_analyst_degrades_instead_of_raising_when_the_model_never_returns_json(tmp_path):
+    as_of = date(2026, 6, 5)
+    chat_client = FakeChatClient(
+        responses=[{"role": "assistant", "content": "I could not produce JSON.", "tool_calls": None}] * 2
+    )
+
+    result = run_technical_analyst(
+        tmp_path,
+        chat_client,
+        commodity="corn",
+        as_of=as_of,
+        model="deepseek-chat",
+        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of)}),
+        history_days=550,
+    )
+
+    assert result["degraded"] is True
+    assert result["seasonality_alignment"] is None
+    assert result["key_levels"] is None
+    assert result["chart_description"] is None
+    # Trend and volatility are computed by code, so they survive the model failure.
+    assert result["trend"] is not None
+    assert result["volatility"] is not None
+
+
+def test_run_technical_analyst_retries_once_when_the_first_reply_is_not_json(tmp_path):
+    as_of = date(2026, 6, 5)
+    good = {"seasonality_alignment": "typical", "key_levels": {}, "chart_description": "flat"}
+    chat_client = FakeChatClient(
+        responses=[
+            {"role": "assistant", "content": "", "tool_calls": None},
+            {"role": "assistant", "content": json.dumps(good), "tool_calls": None},
+        ]
+    )
+
+    result = run_technical_analyst(
+        tmp_path,
+        chat_client,
+        commodity="corn",
+        as_of=as_of,
+        model="deepseek-chat",
+        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of)}),
+        history_days=550,
+    )
+
+    assert result["degraded"] is False
+    assert result["seasonality_alignment"] == "typical"

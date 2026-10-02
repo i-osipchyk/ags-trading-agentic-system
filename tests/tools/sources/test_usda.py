@@ -106,3 +106,31 @@ def test_get_balance_sheet_revisions_has_no_trend_without_a_prior_release(tmp_pa
     result = get_balance_sheet_revisions(tmp_path, symbol="corn", as_of=date(2026, 10, 1), client=client)
 
     assert result == {"symbol": "corn", "ending_stocks_change": None, "stocks_to_use_change": None, "stocks_to_use_trend": None}
+
+
+COFFEE_DEC = {
+    "release_date": "2024-12-18",
+    "marketing_year": "2024/25",
+    "ending_stocks": 21752.0,
+    "stocks_to_use": 13.06,
+}
+COFFEE_JUN = {
+    "release_date": "2025-06-25",
+    "marketing_year": "2025/26",
+    "ending_stocks": 22819.0,
+    "stocks_to_use": 13.47,
+}
+
+
+def test_get_balance_sheet_revisions_for_coffee_reads_the_coffee_report_not_wasde(tmp_path):
+    client = FakeUsdaClient({"coffee": [COFFEE_DEC, COFFEE_JUN]})
+
+    result = get_balance_sheet_revisions(tmp_path, symbol="coffee", as_of=date(2025, 7, 15), client=client)
+
+    assert {report for report, _, _ in client.calls} == {"coffee_world_markets"}
+    assert result == {
+        "symbol": "coffee",
+        "ending_stocks_change": 1067.0,
+        "stocks_to_use_change": 0.41,
+        "stocks_to_use_trend": "loosening",
+    }

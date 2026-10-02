@@ -2,7 +2,7 @@ import json
 from datetime import date
 from typing import Callable
 
-from ags.llm.loop import ChatClient, ToolSpec, run_loop
+from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 
 HORIZON = "1 week"
 
@@ -121,7 +121,7 @@ def run_coordinator(
             )
         )
 
-    loop_result = run_loop(
+    loop_result = run_json_loop(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
     try:

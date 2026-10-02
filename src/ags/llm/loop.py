@@ -99,3 +99,52 @@ def run_loop(
                     "content": json.dumps(result),
                 }
             )
+
+
+_JSON_RETRY_NUDGE = (
+    "Your previous reply was not valid JSON. Respond again with only the required JSON object — no other text."
+)
+
+
+def _is_json(content: str) -> bool:
+    try:
+        json.loads(content)
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
+def run_json_loop(
+    client: ChatClient,
+    *,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    tools: list[ToolSpec],
+    max_tool_calls: int = 5,
+) -> LoopResult:
+    """`run_loop` for agents whose final reply must be JSON.
+
+    If the final reply isn't valid JSON, asks once more in the same
+    conversation, with no tools on offer. The second reply is returned
+    whether or not it parses — callers still handle a failed parse.
+    """
+    result = run_loop(
+        client,
+        model=model,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        tools=tools,
+        max_tool_calls=max_tool_calls,
+    )
+    if _is_json(result.content):
+        return result
+
+    messages = [*result.messages, {"role": "user", "content": _JSON_RETRY_NUDGE}]
+    retry = client.complete(messages, None, model=model)
+    messages.append(retry)
+    return LoopResult(
+        content=retry.get("content") or "",
+        tool_call_cap_hit=result.tool_call_cap_hit,
+        messages=messages,
+    )

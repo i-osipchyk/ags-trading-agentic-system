@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ags.llm.loop import ChatClient, ToolSpec, run_loop
+from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.chart import get_chart_snapshot as compute_chart_snapshot
 from ags.tools.seasonality import get_seasonality as compute_seasonality
 from ags.tools.sources.prices import PricesClient
@@ -132,11 +132,16 @@ def run_technical_analyst(
     )
     user_prompt = f"Assess the technical picture for {commodity} as of {as_of.isoformat()}."
 
-    loop_result = run_loop(
+    loop_result = run_json_loop(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
 
-    parsed = json.loads(loop_result.content)
+    try:
+        parsed = json.loads(loop_result.content)
+    except json.JSONDecodeError:
+        # Trend and volatility were computed by code and are still valid.
+        parsed = {}
+        degraded = True
 
     return {
         "trend": trend,

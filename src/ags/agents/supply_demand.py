@@ -1,15 +1,17 @@
 import json
 from datetime import date
 
-from ags.llm.loop import ChatClient, ToolSpec, run_loop
+from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.sources.usda import EsmisClient, UsdaClient
 from ags.tools.sources.usda import get_balance_sheet_revisions as fetch_revisions
 from ags.tools.sources.usda import get_usda_report as fetch_usda_report
+from ags.tools.sources.usda import report_for_symbol
 
 SYSTEM_PROMPT_TEMPLATE = """You are the Supply/demand analyst for {commodity} futures.
 
 You read structured USDA releases only — no news, no commentary. Use the
-get_usda_report tool for the latest WASDE and its change from the prior
+get_usda_report tool for the latest release (WASDE; for coffee, the FAS
+"Coffee: World Markets and Trade" report) and its change from the prior
 release, and get_balance_sheet_revisions for the month-over-month change in
 ending stocks and stocks-to-use. The as-of date ({as_of}) is fixed; you
 cannot see anything released after it.
@@ -38,7 +40,7 @@ def run_supply_demand_analyst(
     def _get_usda_report_tool(report: str) -> dict:
         nonlocal degraded
         try:
-            result = fetch_usda_report(data_dir, report=report, symbol=commodity, as_of=as_of, client=usda_client)
+            result = fetch_usda_report(data_dir, report=report_for_symbol(commodity), symbol=commodity, as_of=as_of, client=usda_client)
             if result["latest"] is None:
                 degraded = True
             return result
@@ -76,7 +78,7 @@ def run_supply_demand_analyst(
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(commodity=commodity, as_of=as_of.isoformat())
     user_prompt = f"Assess supply/demand for {commodity} as of {as_of.isoformat()}."
 
-    loop_result = run_loop(
+    loop_result = run_json_loop(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
 

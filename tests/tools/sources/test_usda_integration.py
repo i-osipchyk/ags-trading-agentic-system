@@ -7,7 +7,7 @@ from ags.tools.sources.usda import EsmisClient, get_usda_report
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("symbol", ["corn", "soybeans", "wheat"])
+@pytest.mark.parametrize("symbol", ["corn", "soybeans", "wheat", "cotton", "sugar"])
 def test_get_usda_report_pulls_real_wasde_from_esmis_and_is_pit_safe(tmp_path, symbol):
     client = EsmisClient()
     as_of = date(2026, 9, 20)
@@ -21,3 +21,16 @@ def test_get_usda_report_pulls_real_wasde_from_esmis_and_is_pit_safe(tmp_path, s
     assert result["prior"]["release_date"] == "2026-08-12"
     assert result["revision_direction"] in {"up", "down", "unchanged"}
     assert list((tmp_path / usda.SOURCE / "wasde" / symbol).glob("*.json"))
+
+
+@pytest.mark.integration
+def test_get_usda_report_pulls_real_coffee_report_from_esmis_and_is_pit_safe(tmp_path):
+    result = get_usda_report(
+        tmp_path, report="coffee_world_markets", symbol="coffee", as_of=date(2025, 1, 15), client=EsmisClient()
+    )
+
+    # Dec 2024 release was 2024-12-18; the 2025-06-25 one must not leak.
+    assert result["latest"]["release_date"] == "2024-12-18"
+    assert result["latest"]["ending_stocks"] > 0
+    assert 0 < result["latest"]["stocks_to_use"] < 100
+    assert result["prior"]["release_date"] == "2024-06-20"

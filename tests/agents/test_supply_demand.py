@@ -112,7 +112,7 @@ def test_run_supply_demand_analyst_surfaces_degraded_true_when_no_release_exists
 def test_run_supply_demand_analyst_surfaces_degraded_true_when_the_model_returns_unparseable_content(tmp_path):
     result = run_supply_demand_analyst(
         tmp_path,
-        FakeChatClient(responses=[{"role": "assistant", "content": "not valid json", "tool_calls": None}]),
+        FakeChatClient(responses=[{"role": "assistant", "content": "not valid json", "tool_calls": None}] * 2),
         commodity="corn",
         as_of=date(2026, 10, 1),
         model="deepseek-chat",
@@ -120,3 +120,67 @@ def test_run_supply_demand_analyst_surfaces_degraded_true_when_the_model_returns
     )
 
     assert result == {"latest_report": None, "key_figures": [], "stocks_to_use": None, "degraded": True}
+
+
+COFFEE_JUN = {
+    "release_date": "2025-06-25",
+    "marketing_year": "2025/26",
+    "ending_stocks": 22819.0,
+    "stocks_to_use": 13.47,
+}
+
+
+def test_run_supply_demand_analyst_for_coffee_reads_the_coffee_report_even_if_the_model_asks_for_wasde(tmp_path):
+    as_of = date(2025, 7, 15)
+    usda_client = FakeUsdaClient({"coffee": [COFFEE_JUN]})
+    chat_client = FakeChatClient(
+        responses=[
+            _tool_call_message("get_usda_report", {"report": "wasde"}),
+            {"role": "assistant", "content": json.dumps(ANALYST_JSON), "tool_calls": None},
+        ]
+    )
+
+    result = run_supply_demand_analyst(
+        tmp_path, chat_client, commodity="coffee", as_of=as_of, model="deepseek-chat", usda_client=usda_client
+    )
+
+    assert usda_client.calls[0] == ("coffee_world_markets", "coffee", as_of)
+    assert result["degraded"] is False
+
+
+def test_run_supply_demand_analyst_retries_once_when_the_first_final_reply_is_not_json(tmp_path):
+    usda_client = FakeUsdaClient({"corn": [CORN_AUG, CORN_SEP]})
+    chat_client = FakeChatClient(
+        responses=[
+            _tool_call_message("get_usda_report", {"report": "wasde"}),
+            {"role": "assistant", "content": "Sure! Here is the analysis: stocks are tight.", "tool_calls": None},
+            {"role": "assistant", "content": json.dumps(ANALYST_JSON), "tool_calls": None},
+        ]
+    )
+
+    result = run_supply_demand_analyst(
+        tmp_path, chat_client, commodity="corn", as_of=date(2026, 10, 1), model="deepseek-chat", usda_client=usda_client
+    )
+
+    assert result["latest_report"] == ANALYST_JSON["latest_report"]
+    assert result["degraded"] is False
+    # The retry continues the same conversation, with no tools on offer.
+    assert chat_client.calls[2]["tools"] is None
+    assert chat_client.calls[2]["messages"][-2]["content"] == "Sure! Here is the analysis: stocks are tight."
+
+
+def test_run_supply_demand_analyst_degrades_after_a_single_retry_when_the_reply_is_still_not_json(tmp_path):
+    chat_client = FakeChatClient(
+        responses=[
+            {"role": "assistant", "content": "not json", "tool_calls": None},
+            {"role": "assistant", "content": "still not json", "tool_calls": None},
+        ]
+    )
+
+    result = run_supply_demand_analyst(
+        tmp_path, chat_client, commodity="corn", as_of=date(2026, 10, 1), model="deepseek-chat",
+        usda_client=FakeUsdaClient(),
+    )
+
+    assert result["degraded"] is True
+    assert len(chat_client.calls) == 2

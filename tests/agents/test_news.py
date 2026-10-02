@@ -154,6 +154,7 @@ def test_run_news_analyst_surfaces_degraded_true_when_the_model_returns_unparsea
                 "tool_calls": None,
             }
         ]
+        * 2  # the agent asks once more for valid JSON before degrading
     )
 
     result = run_news_analyst(

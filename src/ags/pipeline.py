@@ -30,7 +30,7 @@ class _SharedRunLog:
 
 
 class LoggingChatClient:
-    """Wraps a ChatClient, recording one agent's prompts, tool calls and tool results.
+    """Wraps a ChatClient, recording one agent's prompts, raw replies, tool calls and tool results.
 
     The loop sends the full message history on every call, so what is new
     since the previous call (tool results, the cap-hit nudge) is what gets logged.
@@ -54,6 +54,9 @@ class LoggingChatClient:
 
         response = self._inner.complete(messages, tools, model=model)
 
+        # The raw reply, before any parsing — a reply that fails JSON parsing
+        # is otherwise unrecoverable from the log.
+        self._log("response", {"content": response.get("content")})
         for tool_call in response.get("tool_calls") or []:
             self._log(
                 "tool_call",

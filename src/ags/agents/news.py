@@ -1,7 +1,7 @@
 import json
 from datetime import date
 
-from ags.llm.loop import ChatClient, ToolSpec, run_loop
+from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.sources.news import NewsClient
 from ags.tools.sources.news import fetch_document as fetch_document_pit
 from ags.tools.sources.news import search_news as fetch_search_news
@@ -77,7 +77,7 @@ def run_news_analyst(
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(commodity=commodity, as_of=as_of.isoformat())
     user_prompt = f"Find recent news for {commodity} as of {as_of.isoformat()}."
 
-    loop_result = run_loop(
+    loop_result = run_json_loop(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
 
