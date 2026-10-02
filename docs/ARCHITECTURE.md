@@ -44,7 +44,7 @@ src/ags/
       # ico.py / iccо.py / icac.py added lazily, per commodity, as needed
   llm/               # hand-rolled tool-calling loop, model-agnostic client
   logging/           # run_id generation, JSONL writer/reader
-  ui/                # FastAPI app + Jinja2 templates, chat interface
+  ui/                # Streamlit chat interface (answer_question + render_chat_page)
 run_pipeline.py       # CLI: trigger a weekly run
 run_auditor.py         # CLI: manually trigger due checkpoint evaluations
 tests/
@@ -142,13 +142,16 @@ call (its tool allowlist) — never the tool implementation itself, so the
   the coordinator, writes the JSONL log, prints the final call. No web
   server, no queue, no background worker — a CLI is trivially replaced by a
   scheduled job later without redesign.
-- **Chat interface:** a local FastAPI app (`uvicorn`, localhost-only) with
-  server-rendered Jinja2 templates + minimal vanilla JS — not a JS
-  framework/SPA, not Streamlit/Gradio. Scoped to a single frozen `run_id`;
-  reads only that run's JSONL log and `read_thesis_log`/`read_track_record`
-  equivalents; makes a fresh model call per question but with zero tool
-  access, so "read-only, no live tool calls" is architecturally enforced,
-  not just documented.
+- **Chat interface:** a local Streamlit app (`uv run streamlit run run_chat.py`,
+  bound to `127.0.0.1` via `.streamlit/config.toml`) — not FastAPI/Jinja, not a
+  JS framework/SPA. Scoped to a single frozen `run_id` chosen in the sidebar
+  (newest first; the conversation resets when the run changes); reads only
+  that run's JSONL log; makes a fresh model call per question but with zero
+  tool access (`tools=None`), so "read-only, no live tool calls" is
+  architecturally enforced, not just documented. Chat history is held in
+  Streamlit session state only and is never written to the run log or the
+  audited record. The logic lives in `ags.ui.chat.answer_question` (UI-agnostic)
+  and `ags.ui.streamlit_app.render_chat_page`.
 
 ## Auditor
 
