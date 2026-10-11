@@ -39,7 +39,9 @@ def _render_result(log_dir: Path, output: str) -> None:
     for run_id in run_ids:
         call = coordinator_call(log_dir, run_id)
         st.markdown(f"**{format_run_id(run_id)}**")
-        if call and call.get("call"):
+        if not (Path(log_dir) / f"{run_id}.jsonl").exists():
+            st.caption("This run's log no longer exists.")
+        elif call and call.get("call"):
             render_call(call)
         else:
             st.warning(f"No call: {(call or {}).get('error', 'coordinator output missing')}")

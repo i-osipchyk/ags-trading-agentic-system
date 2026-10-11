@@ -14,6 +14,8 @@ def _timestamp(run_id: str) -> str:
 
 
 def coordinator_call(log_dir: Path, run_id: str) -> dict | None:
+    if not (Path(log_dir) / f"{run_id}.jsonl").exists():
+        return None
     outputs = [e["payload"] for e in RunLog(log_dir, run_id).read() if e["agent"] == "coordinator" and e["event_type"] == "output"]
     return outputs[-1] if outputs else None
 
