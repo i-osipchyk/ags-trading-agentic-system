@@ -56,7 +56,7 @@ class LoggingChatClient:
 
         # The raw reply, before any parsing — a reply that fails JSON parsing
         # is otherwise unrecoverable from the log.
-        self._log("response", {"content": response.get("content")})
+        self._log("response", {"content": response.get("content"), "usage": response.get("usage")})
         for tool_call in response.get("tool_calls") or []:
             self._log(
                 "tool_call",

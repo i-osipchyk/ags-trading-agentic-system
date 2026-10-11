@@ -37,4 +37,21 @@ class DeepSeekChatClient:
                 for tool_call in message.tool_calls
             ]
 
-        return {"role": message.role, "content": message.content, "tool_calls": tool_calls}
+        return {
+            "role": message.role,
+            "content": message.content,
+            "tool_calls": tool_calls,
+            "usage": _usage(response.usage),
+        }
+
+
+def _usage(usage) -> dict | None:
+    if usage is None:
+        return None
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        # DeepSeek-specific split of the prompt into cached and uncached tokens (priced differently).
+        "prompt_cache_hit_tokens": getattr(usage, "prompt_cache_hit_tokens", None),
+        "prompt_cache_miss_tokens": getattr(usage, "prompt_cache_miss_tokens", None),
+    }

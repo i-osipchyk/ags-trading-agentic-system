@@ -151,6 +151,28 @@ def test_run_pipeline_logs_the_models_raw_final_reply_even_when_it_is_not_valid_
     assert result["outputs"]["news"]["degraded"] is True
 
 
+def test_run_pipeline_logs_each_replys_token_usage_on_its_response_event(tmp_path):
+    usage = {
+        "prompt_tokens": 900,
+        "completion_tokens": 120,
+        "prompt_cache_hit_tokens": 800,
+        "prompt_cache_miss_tokens": 100,
+    }
+    replies = dict(_CANNED)
+    replies["News analyst"] = [
+        {"role": "assistant", "content": json.dumps({"headlines": []}), "tool_calls": None, "usage": usage}
+    ]
+
+    result = _run(tmp_path, RoutingChatClient(replies))
+
+    events = _events(tmp_path, result["run_id"])
+    news_response = next(e for e in events if e["agent"] == "news" and e["event_type"] == "response")
+    assert news_response["payload"]["usage"] == usage
+    # A reply without usage (e.g. a provider that omits it) is logged as None, not dropped or crashed on.
+    coordinator_response = next(e for e in events if e["agent"] == "coordinator" and e["event_type"] == "response")
+    assert coordinator_response["payload"]["usage"] is None
+
+
 def test_run_pipeline_gives_every_analyst_the_same_as_of(tmp_path):
     result = _run(tmp_path)
 

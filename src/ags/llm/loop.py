@@ -68,7 +68,9 @@ def run_loop(
                 }
             )
         response_message = client.complete(messages, None if cap_hit else tool_schemas, model=model)
-        messages.append(response_message)
+        # "usage" is bookkeeping about the reply (logged by the caller's client wrapper),
+        # not conversation: it must not be sent back to the provider.
+        messages.append({k: v for k, v in response_message.items() if k != "usage"})
 
         tool_calls = response_message.get("tool_calls")
         if not tool_calls:

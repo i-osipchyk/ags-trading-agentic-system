@@ -225,3 +225,31 @@ def test_run_loop_caps_tool_execution_within_a_single_batch_that_exceeds_the_cap
     assert json.loads(tool_result_messages[6]["content"]) == {
         "error": "tool_call_cap_hit: no further tool calls executed this run"
     }
+
+
+def test_run_loop_does_not_echo_a_replys_usage_back_to_the_model():
+    # Usage is bookkeeping about a reply, not part of the conversation: the
+    # provider would reject (or bill for) an unknown field in the next request.
+    echo = ToolSpec(
+        name="echo",
+        description="Echo.",
+        parameters={"type": "object", "properties": {}},
+        function=lambda: {"ok": True},
+    )
+    client = FakeChatClient(
+        responses=[
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "echo", "arguments": "{}"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+            {"role": "assistant", "content": "done", "tool_calls": None, "usage": {"prompt_tokens": 20}},
+        ]
+    )
+
+    result = run_loop(client, model="m", system_prompt="s", user_prompt="u", tools=[echo])
+
+    second_request = client.calls[1]["messages"]
+    assert all("usage" not in message for message in second_request)
+    assert all("usage" not in message for message in result.messages)
