@@ -124,3 +124,9 @@ def test_no_runs_shows_an_empty_state(tmp_path, chat_client):
 
     assert not app.exception
     assert "no runs" in " ".join(el.value for el in [*app.markdown, *app.info, *app.warning]).lower()
+
+
+def test_a_run_whose_log_was_deleted_has_no_call_instead_of_crashing(tmp_path):
+    from ags.ui.streamlit_app import coordinator_call
+
+    assert coordinator_call(tmp_path, "corn_2026-10-02T15-46-36Z") is None

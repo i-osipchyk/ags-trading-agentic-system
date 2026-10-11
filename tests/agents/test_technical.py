@@ -37,7 +37,9 @@ def _rising_corn_bars(as_of: date, flat_days: int = 400, rise_days: int = 150) -
     # its already-verified {state, age} output transfers here unchanged.
     values = [100.0] * flat_days + [100.0 + i for i in range(1, rise_days + 1)]
     total_days = flat_days + rise_days
-    start = as_of - timedelta(days=total_days - 1)
+    # cTrader stamps a bar with the evening before its session, and only sessions
+    # before as_of are public — so the newest usable stamp is as_of - 2.
+    start = as_of - timedelta(days=total_days + 1)
     return [
         {
             "date": (start + timedelta(days=i)).isoformat(),
@@ -119,7 +121,7 @@ def test_run_technical_analyst_returns_schema_conformant_output_for_one_symbol(t
     system_message = chat_client.calls[0]["messages"][0]
     assert system_message["role"] == "system"
     assert '"ema_8"' in system_message["content"]
-    assert bars[-1]["date"] in system_message["content"]
+    assert (date.fromisoformat(bars[-1]["date"]) + timedelta(days=1)).isoformat() in system_message["content"]
 
 
 def test_run_technical_analyst_surfaces_degraded_true_on_a_source_failure_instead_of_aborting(tmp_path):

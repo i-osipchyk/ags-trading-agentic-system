@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import date, timedelta
 
 from ags.tools.sources.prices import get_prices
 
@@ -22,19 +22,24 @@ CORN_BARS = [
 ]
 
 
+def _sessions(bars):
+    # get_prices re-labels cTrader's open-time stamp to the session it covers.
+    return [{**b, "date": (date.fromisoformat(b["date"]) + timedelta(days=1)).isoformat()} for b in bars]
+
+
 def test_get_prices_fetches_through_client_and_writes_pit_store(tmp_path):
     client = FakeCTraderClient({"Corn": CORN_BARS})
 
     result = get_prices(
         tmp_path,
         commodity="corn",
-        start=date(2026, 1, 5),
-        end=date(2026, 1, 7),
-        as_of=date(2026, 1, 7),
+        start=date(2026, 1, 6),
+        end=date(2026, 1, 8),
+        as_of=date(2026, 1, 9),
         client=client,
     )
 
-    assert result == CORN_BARS[:3]
+    assert result == _sessions(CORN_BARS[:3])
     assert len(client.calls) == 1
     stored = json.loads((tmp_path / "ctrader" / "daily_bars" / "corn" / "2026-01-06.json").read_text())
     assert stored == CORN_BARS[1]
@@ -42,40 +47,96 @@ def test_get_prices_fetches_through_client_and_writes_pit_store(tmp_path):
 
 def test_get_prices_second_call_for_same_range_is_a_noop(tmp_path):
     client = FakeCTraderClient({"Corn": CORN_BARS})
+    kwargs = dict(commodity="corn", start=date(2026, 1, 6), end=date(2026, 1, 8), as_of=date(2026, 1, 9), client=client)
 
-    get_prices(tmp_path, commodity="corn", start=date(2026, 1, 5), end=date(2026, 1, 7), as_of=date(2026, 1, 7), client=client)
-    result = get_prices(tmp_path, commodity="corn", start=date(2026, 1, 5), end=date(2026, 1, 7), as_of=date(2026, 1, 7), client=client)
+    get_prices(tmp_path, **kwargs)
+    result = get_prices(tmp_path, **kwargs)
 
-    assert result == CORN_BARS[:3]
+    assert result == _sessions(CORN_BARS[:3])
     assert len(client.calls) == 1
 
 
 def test_get_prices_second_call_is_a_noop_when_range_includes_a_non_trading_day(tmp_path):
-    # 2026-01-10 and 2026-01-11 are a Saturday/Sunday — the broker never
-    # returns a bar for them, so the cache must remember "no bar here"
-    # rather than treating the gap as still-missing on every call.
+    # Fri/Sat stamps (2026-01-09/10) never carry a bar — a Friday session is
+    # stamped Thursday. The cache must remember "no bar here" rather than
+    # treating the gap as still-missing on every call.
     client = FakeCTraderClient({"Corn": CORN_BARS})
+    kwargs = dict(commodity="corn", start=date(2026, 1, 9), end=date(2026, 1, 12), as_of=date(2026, 1, 13), client=client)
 
-    get_prices(tmp_path, commodity="corn", start=date(2026, 1, 9), end=date(2026, 1, 11), as_of=date(2026, 1, 11), client=client)
-    get_prices(tmp_path, commodity="corn", start=date(2026, 1, 9), end=date(2026, 1, 11), as_of=date(2026, 1, 11), client=client)
+    get_prices(tmp_path, **kwargs)
+    get_prices(tmp_path, **kwargs)
 
     assert len(client.calls) == 1
 
 
-def test_get_prices_never_requests_days_after_as_of(tmp_path):
+def test_get_prices_never_requests_sessions_that_have_not_closed_by_as_of(tmp_path):
     client = FakeCTraderClient({"Corn": CORN_BARS})
 
     result = get_prices(
         tmp_path,
         commodity="corn",
-        start=date(2026, 1, 5),
-        end=date(2026, 1, 7),
-        as_of=date(2026, 1, 6),
+        start=date(2026, 1, 6),
+        end=date(2026, 1, 8),
+        as_of=date(2026, 1, 7),
         client=client,
     )
 
-    assert result == CORN_BARS[:2]
-    assert client.calls == [("Corn", date(2026, 1, 5), date(2026, 1, 6))]
+    # Session 2026-01-07 is still in progress on 2026-01-07: only the 01-06 session (stamp 01-05) is public.
+    assert result == _sessions(CORN_BARS[:1])
+    assert client.calls == [("Corn", date(2026, 1, 5), date(2026, 1, 5))]
+
+
+def test_get_prices_on_a_saturday_returns_fridays_close_as_the_latest_bar(tmp_path):
+    # Friday 2026-01-09's session is stamped Thursday 2026-01-08; Fri/Sat stamps are empty.
+    thursday_stamped = {"date": "2026-01-08", "open": 4.60, "high": 4.65, "low": 4.58, "close": 4.63, "volume": 800}
+    client = FakeCTraderClient({"Corn": CORN_BARS + [thursday_stamped]})
+
+    result = get_prices(
+        tmp_path,
+        commodity="corn",
+        start=date(2026, 1, 3),
+        end=date(2026, 1, 10),
+        as_of=date(2026, 1, 10),
+        client=client,
+    )
+
+    assert result[-1]["date"] == "2026-01-09"
+    assert result[-1]["close"] == 4.63
+
+
+def test_get_prices_on_a_sunday_excludes_the_monday_session_stamped_that_day(tmp_path):
+    sunday_stamped = {"date": "2026-01-11", "open": 4.70, "high": 4.75, "low": 4.68, "close": 4.72, "volume": 700}
+    client = FakeCTraderClient({"Corn": CORN_BARS + [sunday_stamped]})
+
+    result = get_prices(
+        tmp_path,
+        commodity="corn",
+        start=date(2026, 1, 3),
+        end=date(2026, 1, 11),
+        as_of=date(2026, 1, 11),
+        client=client,
+    )
+
+    assert "2026-01-12" not in {bar["date"] for bar in result}
+
+
+def test_get_prices_does_not_cache_a_session_that_has_not_closed_yet(tmp_path):
+    # Regression: caching "no bar yet" for an in-progress session stuck forever,
+    # leaving a later weekend run with a week-old last close.
+    client = FakeCTraderClient({"Corn": []})
+
+    get_prices(
+        tmp_path,
+        commodity="corn",
+        start=date(2026, 1, 5),
+        end=date(2026, 1, 20),
+        as_of=date(2026, 1, 20),
+        client=client,
+        today=date(2026, 1, 8),
+    )
+
+    cached = {p.stem for p in (tmp_path / "ctrader" / "daily_bars" / "corn").glob("*.json")}
+    assert max(cached) == "2026-01-06"  # the 01-07 session (stamp 01-06) is the newest one closed by "today"
 
 
 def test_get_prices_closes_the_client_it_creates_for_itself(tmp_path, monkeypatch):

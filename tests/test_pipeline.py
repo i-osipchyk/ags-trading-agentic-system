@@ -1,6 +1,6 @@
 import json
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from ags.logging.run_log import RunLog
 from ags.pipeline import run_pipeline
@@ -243,16 +243,18 @@ def test_run_pipeline_records_a_crashed_coordinator_as_a_degraded_call(tmp_path)
 
 
 class WeekdayPricesClient:
-    """Serves a flat 4.00 close on every weekday, except 5.25 on the as-of day."""
+    """Serves a flat 4.00 close on every weekday stamp, except 5.25 on the newest public one.
+
+    Stamps are cTrader open-time dates: the newest closed session before AS_OF (Fri) is
+    Thursday's, stamped Wednesday.
+    """
 
     def get_daily_bars(self, symbol_name, start, end):
-        from datetime import timedelta
-
         bars = []
         day = start
         while day <= end:
             if day.weekday() < 5:
-                close = 5.25 if day == AS_OF else 4.0
+                close = 5.25 if day == AS_OF - timedelta(days=2) else 4.0
                 bars.append(
                     {"date": day.isoformat(), "open": close, "high": close, "low": close, "close": close, "volume": 1}
                 )
@@ -273,7 +275,7 @@ def test_run_pipeline_stamps_the_call_with_the_as_of_close_from_code_not_the_mod
         news_client=EmptyNewsClient(),
     )
 
-    assert result["call"]["price_at_call"] == {"price": 5.25, "date": "2026-06-05"}
+    assert result["call"]["price_at_call"] == {"price": 5.25, "date": "2026-06-04"}
 
 
 def test_run_pipeline_leaves_price_at_call_empty_when_prices_are_unavailable(tmp_path):

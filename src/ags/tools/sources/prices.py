@@ -182,6 +182,12 @@ class CTraderPricesClient:
         _do()
 
 
+def _session_date(stamp: date) -> date:
+    # cTrader stamps a D1 bar with its open time, the evening before the
+    # session it covers (Mon's session is stamped Sunday, Fri's Thursday).
+    return stamp + timedelta(days=1)
+
+
 def get_prices(
     data_dir: Path,
     *,
@@ -190,13 +196,26 @@ def get_prices(
     end: date,
     as_of: date,
     client: PricesClient | None = None,
+    today: date | None = None,
 ) -> list[dict]:
-    effective_end = min(end, as_of)
+    """Daily bars keyed by the session they cover (Mon-Fri), not by cTrader's open-time stamp.
+
+    A session is only public once it has closed, so a bar is returned only for
+    sessions strictly before `as_of` (and before the real today). A Saturday or
+    Sunday run therefore sees Friday's close as its latest bar, and a bar for a
+    session still in progress is never read or cached — caching "no bar yet"
+    for it would otherwise stick forever (the PIT cache is immutable).
+    """
+    today = today or datetime.now(timezone.utc).date()
+    last_session = min(end, min(as_of, today) - timedelta(days=1))
+    # The PIT cache stays keyed by cTrader's own stamp date.
+    stamp_start = start - timedelta(days=1)
+    stamp_end = last_session - timedelta(days=1)
 
     bars_by_date: dict[date, dict] = {}
     missing_days: list[date] = []
-    day = start
-    while day <= effective_end:
+    day = stamp_start
+    while day <= stamp_end:
         release = read_pit(data_dir, source=SOURCE, report=REPORT, symbol=commodity, as_of=day)
         if release is not None and release["date"] == day.isoformat():
             if not release.get("no_trading"):
@@ -223,12 +242,13 @@ def get_prices(
         fetched_by_date = {date.fromisoformat(bar["date"]): bar for bar in fetched_bars}
 
         for missing_day in missing_days:
-            # No bar came back for this release_date (e.g. a weekend or
-            # exchange holiday) — cache that fact too, immutably, so the
-            # gap doesn't get re-requested on every future call.
+            # No bar came back for this stamp (e.g. a weekend or exchange
+            # holiday) — cache that fact too, immutably, so the gap doesn't
+            # get re-requested on every future call. Safe because every day
+            # here belongs to a closed session (see docstring).
             bar = fetched_by_date.get(missing_day, {"date": missing_day.isoformat(), "no_trading": True})
             write_pit(data_dir, source=SOURCE, report=REPORT, symbol=commodity, release_date=missing_day, content=bar)
-            if not bar.get("no_trading") and start <= missing_day <= effective_end:
+            if not bar.get("no_trading"):
                 bars_by_date[missing_day] = bar
 
-    return [bars_by_date[d] for d in sorted(bars_by_date)]
+    return [{**bars_by_date[d], "date": _session_date(d).isoformat()} for d in sorted(bars_by_date)]
