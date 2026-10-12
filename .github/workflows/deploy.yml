@@ -23,7 +23,7 @@ permissions:
 jobs:
   live:
     if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || inputs.environment == 'live' }}
-    uses: i-osipchyk/platform/.github/workflows/lambda-deploy.yml@v0.1.1
+    uses: i-osipchyk/platform/.github/workflows/lambda-deploy.yml@v0.1.2
     with:
       project: ags
       environment: live

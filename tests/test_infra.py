@@ -13,7 +13,7 @@ import pytest
 
 ROOT = Path(__file__).parent.parent
 INFRA = ROOT / "infra"
-PLATFORM_REF = "v0.1.1"
+PLATFORM_REF = "v0.1.2"
 
 
 def _tf(directory: Path) -> str:

@@ -38,7 +38,7 @@ def test_llm_calls_go_through_llmkit_pinned_to_a_platform_release():
     assert "llmkit" in _names(PYPROJECT["project"]["dependencies"])
     assert "openai" not in _names(PYPROJECT["project"]["dependencies"])
     source = PYPROJECT["tool"]["uv"]["sources"]["llmkit"]
-    assert source == {"git": "https://github.com/i-osipchyk/platform", "subdirectory": "llmkit", "tag": "v0.1.1"}
+    assert source == {"git": "https://github.com/i-osipchyk/platform", "subdirectory": "llmkit", "tag": "v0.1.2"}
 
 
 def test_only_the_llm_client_module_imports_an_llm_sdk():

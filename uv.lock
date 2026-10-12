@@ -43,7 +43,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.43.111" },
     { name = "crochet", specifier = ">=2.1" },
     { name = "ctrader-open-api", specifier = ">=0.9.2" },
-    { name = "llmkit", extras = ["openai"], git = "https://github.com/i-osipchyk/platform?subdirectory=llmkit&tag=v0.1.1" },
+    { name = "llmkit", extras = ["openai"], git = "https://github.com/i-osipchyk/platform?subdirectory=llmkit&tag=v0.1.2" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pypdf", specifier = ">=6.19.0" },
@@ -810,7 +810,7 @@ wheels = [
 [[package]]
 name = "llmkit"
 version = "0.1.0"
-source = { git = "https://github.com/i-osipchyk/platform?subdirectory=llmkit&tag=v0.1.1#1cb802e0348277aa973dea0cd03905ef5981d1e9" }
+source = { git = "https://github.com/i-osipchyk/platform?subdirectory=llmkit&tag=v0.1.2#d35afdc28ade19abbee24377843973fbfb8ae91a" }
 
 [package.optional-dependencies]
 openai = [

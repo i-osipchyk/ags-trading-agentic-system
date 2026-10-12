@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   ci:
-    uses: i-osipchyk/platform/.github/workflows/python-ci.yml@v0.1.1
+    uses: i-osipchyk/platform/.github/workflows/python-ci.yml@v0.1.2
     with:
       ruff: false # no ruff config yet (platform docs/adoption.md)
       mypy: false

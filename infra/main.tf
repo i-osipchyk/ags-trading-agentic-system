@@ -8,13 +8,13 @@ locals {
 # Source of truth for the PIT store, run logs, audits and the paper book. Versioned, private,
 # prevent_destroy; the function role gets no DeleteObject, so stored data is append-only.
 module "data" {
-  source  = "git::https://github.com/i-osipchyk/platform.git//terraform/modules/data-bucket?ref=v0.1.1"
+  source  = "git::https://github.com/i-osipchyk/platform.git//terraform/modules/data-bucket?ref=v0.1.2"
   project = var.project
   env     = var.env
 }
 
 module "app" {
-  source    = "git::https://github.com/i-osipchyk/platform.git//terraform/modules/lambda-app?ref=v0.1.1"
+  source    = "git::https://github.com/i-osipchyk/platform.git//terraform/modules/lambda-app?ref=v0.1.2"
   project   = var.project
   env       = var.env
   image_uri = var.image_uri
