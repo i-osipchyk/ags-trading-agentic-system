@@ -1,11 +1,14 @@
 # Technical Architecture Decisions
 
 Implementation-level decisions for the pipeline described in `CLAUDE.md` and
-`Ags Trading Analyst — Pipeline Design v2.md`. Those two files define *what*
-the system does and the guardrails it must respect; this file pins down
-*how* it's built. Reached via a grilling session on 2026-09-30 — treat as
+`docs/DESIGN.md` (v3). Those two files define *what* the system does and the
+guardrails it must respect; this file pins down *how* it's built. Reached via
+a grilling session on 2026-09-30, extended by a second one on 2026-10-12
+(scheduled AWS cycles, portfolio stage, paper book, Terraform/CI) — treat as
 settled unless something concrete forces a revisit (not before the 2-month
-review, per the design doc's Review checkpoint).
+review, per the design doc's Review checkpoint). Sections from "Scheduled
+cycles on AWS" onward are v3 additions; earlier sections are amended in place
+where v3 changed them.
 
 ## Runtime
 
@@ -43,16 +46,37 @@ src/ags/
       cot.py         # CFTC positioning archive
       # ico.py / iccо.py / icac.py added lazily, per commodity, as needed
   llm/               # hand-rolled tool-calling loop, model-agnostic client
-  logging/           # run_id generation, JSONL writer/reader
+  logging/           # run_id / cycle_id generation, JSONL writer/reader
+  storage/           # Storage protocol: LocalStorage, S3Storage (v3)
+  portfolio/         # v3: no LLM code except manager.py
+    book.py          # Book protocol + cTrader-shaped Position/Fill models
+    paper_book.py    # PaperBook: fills, swap, margin, stop-out replay
+    specs.py         # symbol specs (lot size, volume min/step/max, swap, margin rate)
+    risk.py          # ATR, atr_usd_per_lot, notional
+    guardrails.py    # pure function: proposal → applied deltas + violations
+    shadow.py        # mechanical sizer
+    manager.py       # manager agent: prompt + output schema (agents/ style)
+    stage.py         # run_portfolio(cycle_id): the whole portfolio stage
+    metrics.py       # equity curves, manager-vs-shadow P&L, spend rollups
+  notify/            # Telegram client, alerts, daily digest (v3)
+  handlers/          # Lambda entry points — thin wrappers, no logic (v3)
   ui/                # Streamlit app: runs grid + job control (runs, jobs, runs_page), chat (chat, streamlit_app)
-run_pipeline.py       # CLI: trigger a weekly run
+run_pipeline.py       # CLI: one commodity run (local, unofficial namespace)
+run_cycle.py          # CLI: full cycle locally — 7 pipelines + portfolio stage (v3, unofficial)
 run_auditor.py         # CLI: trigger due checkpoint evaluations (all, or one via --run-id/--weeks)
+scripts/sync_local.sh  # pull-only S3 → local mirror (v3)
+infra/                 # Terraform (v3)
+  bootstrap/           # one-time, applied by hand: state bucket + GitHub OIDC deploy role
+Dockerfile             # Lambda container image (v3)
+.github/workflows/     # deploy on push to main (v3)
 tests/
   tools/               # PIT fixture-based unit tests
-data/                   # PIT store contents (gitignored)
-logs/                    # run JSONL logs (gitignored)
+data/                   # PIT store contents (gitignored; mirror of S3 in v3)
+logs/                    # run JSONL logs (gitignored; mirror of S3 in v3)
 jobs/                    # UI job lock, output tail, exit code (gitignored)
-audits/                  # audit JSON files (gitignored)
+audits/                  # audit JSON files (gitignored; mirror of S3 in v3)
+portfolio/               # paper-book cycle files + portfolio logs (gitignored; mirror of S3)
+local/                   # unofficial local runs — never synced up (gitignored, v3)
 .env / .env.example
 ```
 
@@ -112,6 +136,26 @@ call (its tool allowlist) — never the tool implementation itself, so the
   earlier release_date exists. No end-to-end PIT testing through a live
   agent run — the leakage risk lives entirely in `read_pit`.
 
+### Timestamp-precise `as_of` (v3)
+
+Built with `as_of: date`, which was enough for one run a week. With 04:00 and
+16:00 ET cycles on the same day, a date is ambiguous — both cycles would read
+the same `as_of`, and a report released at 12:00 ET would be inside the 04:00
+cycle's window on replay. v3 moves every data-access function to a
+timezone-aware `as_of: datetime`:
+
+- `read_pit` filters on a release **timestamp** (`release_date` stays for
+  sources that only publish a date; those are treated as released at a
+  per-source configured time, e.g. WASDE 12:00 ET, COT 15:30 ET, and at
+  end-of-day when unknown — conservative, never early).
+- Daily price bars: only **completed** bars are visible at `as_of`. The 04:00
+  cycle never sees the in-progress session as a close.
+- Quotes and intraday bars are new PIT objects keyed by capture timestamp.
+- `run_id` was already timestamped; `as_of` is the cycle's trigger timestamp.
+
+The fixture suite gains intraday cases: same-day release before vs after
+`as_of`, and the partial-daily-bar case.
+
 ## Deterministic computation
 
 - Trend, volatility, and similar "facts" (per the design doc's requirement
@@ -135,8 +179,27 @@ call (its tool allowlist) — never the tool implementation itself, so the
   drift from revised sources and burn cost for no auditing benefit).
 - The log is the source of truth for both the auditor's frozen inputs and
   the chat interface's "no live tool calls" constraint.
+- **Cycles (v3):** `cycle_id` = `cycle_{trigger_timestamp}`. The seven
+  commodity `run_id`s in a cycle share its trigger timestamp, so they group
+  without a lookup. The portfolio stage logs to
+  `portfolio/logs/{cycle_id}.jsonl` — deliberately **outside** `logs/`, so
+  the auditor's scan and the unchanged UI grid never mistake it for a
+  commodity run. Same event schema, plus event types `proposal_raw`,
+  `proposal_applied`, `violations`, `fills`.
+- **On S3 (v3):** S3 has no append. In a Lambda, `RunLog` writes JSONL to
+  `/tmp` as today and uploads the file once, at the end of the run and from
+  a `finally` block on failure — so a crashed run still leaves its log.
 
 ## Trigger and UI
+
+**v3 amendment:** the official trigger is now the scheduler (see "Scheduled
+cycles on AWS"). The CLIs stay, but write to the unofficial `local/`
+namespace. The UI is **deliberately unchanged** in v3: it reads the
+pull-only mirror at the same `logs/` / `audits/` paths as before. Its run
+buttons still work but write to `local/`, so their output doesn't appear in
+the grid — a known gap until the UI is revisited. The "off-cadence" flag
+still says "not Friday," which is now meaningless; also left for the UI
+revisit.
 
 - **Pipeline trigger:** synchronous CLI, `python run_pipeline.py --commodity corn`.
   Generates `run_id`, `asyncio.gather`s the four analysts, passes results to
@@ -181,6 +244,15 @@ call (its tool allowlist) — never the tool implementation itself, so the
   matched back to the originating run and horizon independently.
 - Idempotent by scan: a missed week self-heals the next time the command
   runs; nothing is lost, it just grades late.
+- **v3:** triggered by its own EventBridge schedule (weekdays, 18:00 ET)
+  instead of by hand; same scan, same idempotency.
+- **1-day diagnostic checkpoint (v3):** kept **out of** `CHECKPOINT_WEEKS`,
+  in its own `DIAGNOSTIC_CHECKPOINT_DAYS = (1,)`, stored as
+  `audits/{run_id}/1d.json` with `checkpoint_days: 1` instead of
+  `checkpoint_weeks`. The UI iterates `CHECKPOINT_WEEKS` to draw grid
+  columns, so this keeps it invisible there. `read_track_record` includes it.
+  Due when the first **completed** daily bar after the call exists (a 16:00
+  Friday call is graded off Monday's close, not Saturday's).
 
 ## Coordinator track record ("digital brain")
 
@@ -261,3 +333,169 @@ to matter.
 - `.env.example` checked in with no real values.
 - Fails fast at startup if a required key is missing, rather than failing
   mid-run partway through the four analysts.
+- **v3, in Lambda:** the same `Config`, populated from one Secrets Manager
+  secret (JSON of the same keys) instead of `.env`, loaded once per
+  container. New keys: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
+  `CTRADER_REFRESH_TOKEN`. Non-secret settings (guardrail limits, risk
+  budget, starting equity, stop-out level, per-source release times, storage
+  bucket) are plain env vars set by Terraform.
+- **Guardrail and book parameters** are config, never literals in code:
+  `PER_COMMODITY_CAP=1.0`, `GRAIN_BUCKET_CAP=1.5`, `GROSS_LEVERAGE_CAP=3.0`,
+  `MARGIN_BUFFER=0.40`, `MIN_RESIZE_FRACTION=0.20`, `DRAWDOWN_BREAKER=0.80`,
+  `STARTING_EQUITY_USD=10000`, `SHADOW_RISK_BUDGET=0.01`,
+  `STOP_OUT_MARGIN_LEVEL=0.50` (verify against the Pepperstone account).
+
+## Scheduled cycles on AWS (v3)
+
+Region `eu-west-1`, from `AWS_REGION` — never hard-coded in Terraform or
+code. Schedules are in `America/New_York` regardless of region.
+
+```
+EventBridge Scheduler  cron(0 4,16 ? * MON-FRI *)  tz America/New_York
+  └─ Step Functions "cycle"  (input: cycle_id, scheduled_time, off_schedule)
+       ├─ Map ×7 (parallel) → Lambda commodity_pipeline(commodity)
+       │     retry 2× with backoff; Catch → {commodity, failed: true}
+       └─ Lambda portfolio(cycle_id, commodity results)
+Scheduler (weekdays 17:00 ET) → Lambda digest
+Scheduler (weekdays 18:00 ET) → Lambda auditor
+Scheduler (daily)             → Lambda token_refresh
+CloudWatch alarms (execution failed, Lambda errors) → Lambda notify → Telegram
+```
+
+- **One container image** (ECR, arm64), all six Lambdas, different handler
+  per function. Built from the same `src/ags` package with the UI dependency
+  group excluded (Streamlit moves to a `ui` dependency group; uv's
+  `default-groups` keeps local `uv sync` unchanged). Zip packaging was
+  rejected: pandas + numpy + Twisted + the cTrader SDK sit too close to the
+  250 MB unzipped limit.
+- **Timeouts:** `commodity_pipeline` 10 min (today's runs take 33–70 s
+  sequentially; headroom for retries and slow sources), `portfolio` 5 min.
+- **Twisted/crochet in Lambda:** `crochet.setup()` runs once per container at
+  import time and the reactor is never stopped — Twisted's reactor can't be
+  restarted in-process. The cTrader client connection is reused across warm
+  invocations and re-established on failure.
+- **Late-start rule:** a cycle whose execution starts more than 1 h after its
+  `scheduled_time` aborts and alerts rather than running late — a late run
+  would break comparability.
+- **Missing commodity:** the portfolio Lambda receives the Map results; a
+  `failed: true` commodity becomes a `null` call → guardrail 9 holds its leg.
+  Two consecutive failures for the same commodity alert.
+- **Off-schedule cycles** (started by hand:
+  `aws stepfunctions start-execution` with `off_schedule: true`) run the full
+  pipeline and the manager but **do not write either book** — the proposal
+  and would-be fills are logged only. Keeps the paper P&L strictly on the
+  scheduled cadence.
+
+## Storage backend (v3)
+
+- A small `Storage` protocol (`get`, `put_if_absent`, `list`, `put`) with
+  `LocalStorage` (today's file layout, rooted at a directory) and
+  `S3Storage` (same keys, one bucket). `pit_store`, `RunLog`, audits,
+  `read_track_record`, the auditor scan, and the paper book all go through
+  it — no direct `Path` I/O outside `LocalStorage`.
+- **Immutability on S3:** `put_if_absent` uses S3 conditional writes
+  (`If-None-Match: *`), so seven parallel Lambdas writing the same PIT
+  release can't overwrite each other — the loser gets a no-op, matching
+  `write_pit`'s existing "refuse to overwrite" semantics.
+- **Bucket:** versioning on, `prevent_destroy`, no lifecycle expiry. Keys:
+  `data/…`, `logs/…`, `audits/…`, `portfolio/…`, `archive/pre-v3/…`.
+- **Local mirror:** `scripts/sync_local.sh` = `aws s3 sync` **down only**
+  into `data/`, `logs/`, `audits/`, `portfolio/`. Nothing syncs up. Local CLI
+  runs use `LocalStorage` rooted at `local/` (also used for `--as-of`
+  backtests), so they can never mix into the official record.
+
+## Paper book (v3)
+
+- **`Book` protocol, cTrader-shaped.** Models mirror cTrader's
+  `ProtoOAPosition` / `ProtoOATradeData` / `ProtoOASymbol`: `position_id`,
+  `symbol_id`/`symbol_name`, `trade_side` (BUY/SELL), `volume` in cTrader
+  units (1/100 of a unit, as the API sends it), `price`,
+  `open_timestamp`, `swap`, `commission`, `used_margin`, `money_digits`. Lots
+  appear only at the edge: `lots = volume / 100 / lot_size`. `PaperBook` is
+  the only implementation.
+- **State = append-only cycle files.** Each cycle writes one immutable
+  `portfolio/{book}/cycles/{cycle_id}.json` (`book` ∈ `manager`, `shadow`):
+  opening state, stop-out replay result, swap accrued, inputs given to the
+  sizer, raw and applied deltas, violations, fills, closing state, equity,
+  peak equity. Current state = the latest cycle file. Replaying all cycle
+  files from the start reproduces the equity curve exactly.
+- **Order of operations per cycle:** (1) load last closing state; (2) replay
+  H1 bars since the last cycle — accrue swap at each rollover crossed, check
+  margin level against the stop-out level at each bar using the adverse
+  extreme (low for longs, high for shorts), close the largest-loss position
+  first as cTrader does; (3) mark to the current quote; (4) run sizer →
+  guardrails; (5) fill at bid/ask; (6) write the cycle file.
+- **Market data it needs** (all PIT, all through `read_pit`): symbol specs
+  (`lotSize`, `minVolume`, `stepVolume`, `maxVolume`, `swapLong`,
+  `swapShort`, swap calculation type, triple-swap day, margin rate), a
+  bid/ask quote snapshot at fill time, H1 trendbars between cycles, daily
+  bars for ATR. Specs are refetched daily and stored PIT, since swap rates
+  change.
+- **Drawdown-breaker reset:** an SSM parameter `breaker_reset_at`, set by
+  hand (`aws ssm put-parameter`). The portfolio Lambda reads it and records
+  the reset in the next cycle file — so the reset is logged and the book
+  still has exactly one writer.
+- **No-live-execution test:** `tests/test_no_live_execution.py` greps
+  `src/` for cTrader trading message names (`ProtoOANewOrderReq`,
+  `ProtoOAAmendPositionSLTPReq`, `ProtoOAClosePositionReq`,
+  `ProtoOACancelOrderReq`, `ProtoOAAmendOrderReq`) and fails on any hit.
+
+## Guardrail engine (v3)
+
+- `apply_guardrails(proposal, book_state, calls, specs, risk, config,
+  breaker_active) -> (applied_deltas, violations)` — pure, no I/O, so every
+  rule is a table-driven unit test.
+- Rules run in the order of the design doc's table. Whole-proposal rejects
+  (schema) short-circuit to "hold all." Per-leg clamps (direction, cap,
+  churn, breaker, missing input) run before the portfolio-level scalings
+  (grain bucket, gross, margin), and per-leg rounding to volume step runs
+  last — rounding is always toward zero, so it can never push a leg back
+  over a cap.
+- Each violation: `{rule, symbol | null, proposed, applied, detail}`.
+- The shadow sizer's output goes through the same function.
+
+## cTrader token refresh (v3)
+
+Unattended runs need it: cTrader Open API access tokens expire (~30 days).
+`token_refresh` runs daily, refreshes when the token is within 7 days of
+expiry, and writes the new access + refresh tokens back to the Secrets
+Manager secret. Failure alerts on Telegram. Lambdas read the secret per cold
+start, and once more on an auth error.
+
+## Notifications (v3)
+
+- One Telegram bot, one chat; `notify/telegram.py` is a thin `sendMessage`
+  wrapper (HTML parse mode, long messages split).
+- **Alerts:** a `notify` Lambda subscribed to CloudWatch alarms (Step
+  Functions execution failed, Lambda errors), plus direct calls from the
+  portfolio Lambda (commodity failed two cycles running, breaker tripped)
+  and `token_refresh` (refresh failed).
+- **Digest:** the `digest` Lambda reads the last 24 h of cycle files and run
+  logs from S3. LLM spend is summed from the per-call cost the LLM layer
+  already records in run logs (by agent, by commodity, 24 h and
+  month-to-date); AWS spend comes from Cost Explorer, labeled as the prior
+  day. Content: spend, book, manager vs shadow, latest calls.
+
+## Infrastructure as code and deployment (v3)
+
+- **Terraform**, in `infra/`. State in an S3 bucket with S3-native locking
+  (`use_lockfile = true`, no DynamoDB). The AWS provider takes its region
+  from `AWS_REGION`.
+- **Bootstrap** (`infra/bootstrap/`, applied once by hand, local state): the
+  state bucket and the GitHub OIDC provider + deploy role, trust-scoped to
+  `repo:i-osipchyk/ags-trading-agentic-system:ref:refs/heads/main`. No
+  long-lived AWS keys in GitHub.
+- **Main stack:** data bucket, ECR repo, Lambdas, Step Functions state
+  machine, EventBridge schedules, Secrets Manager secret (value set by hand,
+  not in Terraform state), SSM breaker parameter, CloudWatch alarms, IAM.
+  `prevent_destroy` on the data bucket, the state bucket, and the secret.
+- **Deploy on push to `main`** (GitHub Actions, single prod environment, no
+  plan review):
+  1. `uv sync` + `pytest` (unit only — the existing `addopts = "-m 'not
+     integration'"` already excludes integration tests, which hit real
+     services and cost money).
+  2. Build and push the image, tagged with the commit SHA.
+  3. Wait until no Step Functions execution is `RUNNING` (poll, 15-min cap),
+     so no cycle straddles two image versions.
+  4. `terraform apply -auto-approve` with the new image tag.
+- Local CLI runs are the only sandbox; there is no dev/staging stack.
