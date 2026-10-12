@@ -14,16 +14,21 @@ dependencies = [
     "python-dateutil>=2.9.0.post0",
     "requests>=2.32.3",
     "pyshp>=3.1.6",
-    "streamlit>=1.60.0",
     "pypdf>=6.19.0",
     "boto3>=1.43.111",
 ]
 
 [dependency-groups]
+ui = [
+    "streamlit>=1.60.0",
+]
 dev = [
     "moto[s3]>=5.2.4",
     "pytest>=8.0",
 ]
+
+[tool.uv]
+default-groups = ["dev", "ui"]
 
 [build-system]
 requires = ["hatchling"]

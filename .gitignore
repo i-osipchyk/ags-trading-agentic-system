@@ -222,3 +222,13 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 /jobs/
+
+# Official-record mirror (pull-only) and unofficial local runs
+/portfolio/
+/local/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log

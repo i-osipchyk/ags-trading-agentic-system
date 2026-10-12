@@ -14,6 +14,7 @@ resolution-markers = [
 name = "ags"
 version = "0.1.0"
 source = { editable = "." }
+default-groups = ["dev", "ui"]
 dependencies = [
     { name = "boto3" },
     { name = "crochet" },
@@ -26,7 +27,6 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "python-dotenv" },
     { name = "requests" },
-    { name = "streamlit" },
     { name = "tavily-python" },
 ]
 
@@ -34,6 +34,9 @@ dependencies = [
 dev = [
     { name = "moto", extra = ["s3"] },
     { name = "pytest" },
+]
+ui = [
+    { name = "streamlit" },
 ]
 
 [package.metadata]
@@ -49,7 +52,6 @@ requires-dist = [
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "requests", specifier = ">=2.32.3" },
-    { name = "streamlit", specifier = ">=1.60.0" },
     { name = "tavily-python", specifier = ">=0.8.4" },
 ]
 
@@ -58,6 +60,7 @@ dev = [
     { name = "moto", extras = ["s3"], specifier = ">=5.2.4" },
     { name = "pytest", specifier = ">=8.0" },
 ]
+ui = [{ name = "streamlit", specifier = ">=1.60.0" }]
 
 [[package]]
 name = "altair"

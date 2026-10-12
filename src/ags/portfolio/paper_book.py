@@ -72,6 +72,13 @@ class PaperBook:
         closing_side = "SELL" if sign == 1 else "BUY"
         return self._fill(position["symbol_name"], closing_side, volume, price, realized, timestamp)
 
+    def rebase_peak(self, equity: float) -> None:
+        self._state["peak_equity"] = equity
+
+    def mark_to(self, quotes: dict) -> None:
+        """Record the quote midpoints as the marks the next replay starts from."""
+        self._state["marks"] = {s: (q["bid"] + q["ask"]) / 2 for s, q in quotes.items()}
+
     def accrue_swap(self, day: date, specs: dict, prices: dict | None = None) -> None:
         """Charge one rollover (17:00 ET on `day`) to every open position.
 

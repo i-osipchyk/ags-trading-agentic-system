@@ -1,0 +1,61 @@
+{
+  "Comment": "One scheduled cycle: seven commodity pipelines in parallel, then the portfolio stage. Fixed run shape.",
+  "StartAt": "Commodities",
+  "States": {
+    "Commodities": {
+      "Type": "Pass",
+      "Result": ["corn", "soybeans", "wheat", "sugar", "coffee", "cotton", "cocoa"],
+      "ResultPath": "$.commodities",
+      "Next": "RunCommodities"
+    },
+    "RunCommodities": {
+      "Type": "Map",
+      "ItemsPath": "$.commodities",
+      "MaxConcurrency": 7,
+      "ItemSelector": {
+        "commodity.$": "$$.Map.Item.Value",
+        "scheduled_time.$": "$.scheduled_time",
+        "off_schedule.$": "$.off_schedule"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "Pipeline",
+        "States": {
+          "Pipeline": {
+            "Type": "Task",
+            "Resource": "${commodity_pipeline_arn}",
+            "Retry": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "IntervalSeconds": 10,
+                "MaxAttempts": 2,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }
+            ],
+            "End": true
+          },
+          "MarkFailed": {
+            "Type": "Pass",
+            "Parameters": { "commodity.$": "$.commodity", "failed": true, "call": null },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.results",
+      "Next": "Portfolio"
+    },
+    "Portfolio": {
+      "Type": "Task",
+      "Resource": "${portfolio_arn}",
+      "Parameters": {
+        "scheduled_time.$": "$.scheduled_time",
+        "off_schedule.$": "$.off_schedule",
+        "results.$": "$.results"
+      },
+      "End": true
+    }
+  }
+}

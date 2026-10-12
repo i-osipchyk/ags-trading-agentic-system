@@ -15,19 +15,24 @@ def _coordinator_output(log_store: Storage, run_id: str) -> dict | None:
     return None
 
 
-_AUDIT_FIELDS = ("checkpoint_weeks", "direction_correct", "driver_verdicts", "calibration_note", "thesis_vs_outcome")
+_AUDIT_FIELDS = ("direction_correct", "driver_verdicts", "calibration_note", "thesis_vs_outcome")
+
+
+def _horizon_days(audit: dict) -> int:
+    return audit["checkpoint_days"] if "checkpoint_days" in audit else audit["checkpoint_weeks"] * 7
 
 
 def _audits(audit_store: Storage, run_id: str, as_of: datetime) -> list[dict]:
     audits = []
     for key in audit_store.list(f"{run_id}/"):
-        if not key.endswith("w.json"):
+        if not key.endswith(("w.json", "d.json")):
             continue
         audit = json.loads(audit_store.get(key))
         if datetime.fromisoformat(audit["graded_at"]) > as_of:
             continue
-        audits.append({f: audit[f] for f in _AUDIT_FIELDS})
-    return sorted(audits, key=lambda a: a["checkpoint_weeks"])
+        checkpoint = "checkpoint_days" if "checkpoint_days" in audit else "checkpoint_weeks"
+        audits.append({checkpoint: audit[checkpoint], **{f: audit[f] for f in _AUDIT_FIELDS}})
+    return sorted(audits, key=_horizon_days)
 
 
 def read_track_record(log_dir: Storage | Path, audit_dir: Storage | Path, *, commodity: str, lookback_weeks: int, as_of: datetime) -> list[dict]:

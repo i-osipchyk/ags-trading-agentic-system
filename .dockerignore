@@ -1,0 +1,12 @@
+.venv
+.git
+.env
+data
+logs
+audits
+local
+portfolio
+tests
+docs
+infra
+__pycache__

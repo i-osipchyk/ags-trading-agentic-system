@@ -114,3 +114,17 @@ def test_run_ids_are_displayed_as_a_capitalised_commodity_and_a_utc_timestamp():
 
 def test_an_unparseable_run_id_is_shown_as_is():
     assert format_run_id("notes") == "notes"
+
+
+def test_a_1_day_diagnostic_file_does_not_change_the_grid(tmp_path):
+    log_dir, audit_dir = _dirs(tmp_path)
+    _write_run(log_dir, RUN)
+    _write_audit(audit_dir, RUN, 1)
+    now = datetime(2026, 10, 12, tzinfo=timezone.utc)
+    without = build_grid(log_dir, audit_dir, now=now)
+
+    (audit_dir / RUN / "1d.json").write_text(json.dumps({"checkpoint_days": 1, "direction_correct": False}))
+    with_diagnostic = build_grid(log_dir, audit_dir, now=now)
+
+    assert with_diagnostic == without
+    assert list(with_diagnostic[0]["cells"]) == [1, 2, 4, 8]

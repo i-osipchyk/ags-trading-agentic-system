@@ -7,10 +7,13 @@ import pandas as pd
 
 from ags.llm.loop import ChatClient, run_loop
 from ags.storage import Storage, as_storage
-from ags.tools.sources.prices import PricesClient, get_prices
+from ags.tools.pit_store import ET
+from ags.tools.sources.prices import SESSION_CLOSE_ET, PricesClient, get_prices
 from ags.tools.trend import get_trend_state
 
 CHECKPOINT_WEEKS = (1, 2, 4, 8)
+# Kept out of CHECKPOINT_WEEKS: the UI draws one grid column per entry there.
+DIAGNOSTIC_CHECKPOINT_DAYS = (1,)
 
 _RUN_ID = re.compile(r"^[a-z]+_(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)$")
 
@@ -27,7 +30,7 @@ _PLAYED_OUT = {"yes", "no", "partially"}
 _VERDICT_FIELDS = ("driver_verdicts", "calibration_note", "thesis_vs_outcome")
 
 SYSTEM_PROMPT_TEMPLATE = """You are the Auditor for {commodity} futures, grading one past call at its
-{weeks}-week checkpoint ({checkpoint_date}). You see only the frozen record of
+{checkpoint_label} ({checkpoint_date}). You see only the frozen record of
 that run and the price path up to the checkpoint — nothing newer.
 
 The price outcome below is computed by code; treat it as fact. Your job is
@@ -74,6 +77,44 @@ def find_due_checkpoints(
                 continue
             if triggered + timedelta(weeks=weeks) <= now and not graded:
                 due.append((run_id, weeks))
+    return due
+
+
+def diagnostic_checkpoint_at(triggered: datetime, days: int) -> datetime:
+    """The first weekday session close (17:00 ET) at or after `triggered + days`.
+
+    So a Friday 16:00 call is graded off Monday's close, never off the weekend.
+    """
+    ready = (triggered + timedelta(days=days)).astimezone(ET)
+    day = ready.date()
+    while True:
+        close = datetime.combine(day, SESSION_CLOSE_ET, tzinfo=ET)
+        if day.weekday() < 5 and close >= ready:
+            return close
+        day += timedelta(days=1)
+
+
+def find_due_diagnostics(
+    log_dir: Storage | Path, audit_dir: Storage | Path, *, now: datetime, only: tuple[str, int] | None = None
+) -> list[tuple[str, int]]:
+    """Due 1-day diagnostic checkpoints as (run_id, days). Separate from the weekly scan on purpose."""
+    log_store, audit_store = as_storage(log_dir), as_storage(audit_dir)
+    due = []
+    for key in log_store.list(""):
+        if "/" in key or not key.endswith(".jsonl"):
+            continue
+        run_id = key.removesuffix(".jsonl")
+        triggered = _triggered_at(run_id)
+        if triggered is None:
+            continue
+        output = _outputs(log_store, run_id).get("coordinator")
+        if output is None or output.get("call") is None:
+            continue
+        for days in DIAGNOSTIC_CHECKPOINT_DAYS:
+            if only is not None and only != (run_id, days):
+                continue
+            if audit_store.get(f"{run_id}/{days}d.json") is None and diagnostic_checkpoint_at(triggered, days) <= now:
+                due.append((run_id, days))
     return due
 
 
@@ -137,16 +178,20 @@ def grade_checkpoint(
     log_dir: Storage | Path,
     data_dir: Storage | Path,
     run_id: str,
-    weeks: int,
+    weeks: int | None = None,
+    days: int | None = None,
     model: str,
     now: datetime,
     prices_client: PricesClient | None = None,
 ) -> dict:
+    """Grade one checkpoint: `weeks` for a weekly one, `days` for a diagnostic."""
+    if (weeks is None) == (days is None):
+        raise ValueError("give exactly one of weeks or days")
     outputs = _outputs(as_storage(log_dir), run_id)
     call = outputs["coordinator"]
     triggered = _triggered_at(run_id)
     commodity = run_id.split("_")[0]
-    checkpoint_at = triggered + timedelta(weeks=weeks)
+    checkpoint_at = triggered + timedelta(weeks=weeks) if weeks else diagnostic_checkpoint_at(triggered, days)
 
     price_outcome = _price_outcome(
         data_dir,
@@ -158,7 +203,9 @@ def grade_checkpoint(
     )
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        commodity=commodity, weeks=weeks, checkpoint_date=checkpoint_at.date().isoformat()
+        commodity=commodity,
+        checkpoint_label=f"{weeks}-week checkpoint" if weeks else f"{days}-day diagnostic checkpoint",
+        checkpoint_date=checkpoint_at.date().isoformat(),
     )
     user_prompt = (
         "Frozen run record (analyst outputs and the coordinator's call):\n"
@@ -172,7 +219,7 @@ def grade_checkpoint(
 
     return {
         "run_id": run_id,
-        "checkpoint_weeks": weeks,
+        **({"checkpoint_weeks": weeks} if weeks else {"checkpoint_days": days}),
         "price_outcome": price_outcome,
         "direction_correct": _direction_correct(call["call"], price_outcome["return"]),
         **{field: parsed[field] for field in _VERDICT_FIELDS},
@@ -192,6 +239,19 @@ def run_auditor(
     only: tuple[str, int] | None = None,
 ) -> dict:
     graded, failed = [], []
+    graded_diagnostics, failed_diagnostics = [], []
+    # A targeted re-grade (`only`) names a weekly checkpoint, so diagnostics are skipped.
+    for run_id, days in [] if only else find_due_diagnostics(log_dir, audit_dir, now=now):
+        try:
+            audit = grade_checkpoint(
+                chat_client, log_dir=log_dir, data_dir=data_dir, run_id=run_id, days=days, model=model,
+                now=now, prices_client=prices_client,
+            )
+        except Exception as exc:
+            failed_diagnostics.append(((run_id, days), f"{type(exc).__name__}: {exc}"))
+            continue
+        as_storage(audit_dir).put(f"{run_id}/{days}d.json", json.dumps(audit, indent=2).encode())
+        graded_diagnostics.append((run_id, days))
     for run_id, weeks in find_due_checkpoints(log_dir, audit_dir, now=now, only=only):
         try:
             audit = grade_checkpoint(
@@ -210,4 +270,9 @@ def run_auditor(
             continue
         as_storage(audit_dir).put(f"{run_id}/{weeks}w.json", json.dumps(audit, indent=2).encode())
         graded.append((run_id, weeks))
-    return {"graded": graded, "failed": failed}
+    return {
+        "graded": graded,
+        "failed": failed,
+        "graded_diagnostics": graded_diagnostics,
+        "failed_diagnostics": failed_diagnostics,
+    }

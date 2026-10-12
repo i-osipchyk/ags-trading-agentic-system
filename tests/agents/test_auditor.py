@@ -241,15 +241,15 @@ def _run(tmp_path, reply=VERDICTS, now=RUN_NOW):
 def test_writes_one_audit_file_per_due_checkpoint_and_is_idempotent(tmp_path):
     result, client, audit_dir = _run(tmp_path)
 
-    assert result == {"graded": [(RUN_ID, 1), (RUN_ID, 2)], "failed": []}
-    assert sorted(p.name for p in (audit_dir / RUN_ID).iterdir()) == ["1w.json", "2w.json"]
+    assert (result["graded"], result["failed"]) == ([(RUN_ID, 1), (RUN_ID, 2)], [])
+    assert sorted(p.name for p in (audit_dir / RUN_ID).iterdir()) == ["1d.json", "1w.json", "2w.json"]
     one_week = json.loads((audit_dir / RUN_ID / "1w.json").read_text())
     assert one_week["checkpoint_weeks"] == 1 and one_week["run_id"] == RUN_ID
-    assert len(client.calls) == 2  # a separate evaluator invocation per pair
+    assert len(client.calls) == 3  # a separate evaluator invocation per pair (two weekly + the 1-day diagnostic)
 
     again, client2, _ = _run(tmp_path)
 
-    assert again == {"graded": [], "failed": []}
+    assert (again["graded"], again["failed"]) == ([], [])
     assert client2.calls == []
 
 
@@ -278,7 +278,7 @@ def test_written_audits_are_readable_by_the_coordinators_track_record(tmp_path):
         tmp_path / "logs", audit_dir, commodity="corn", lookback_weeks=8, as_of=datetime(2026, 6, 25, tzinfo=timezone.utc)
     )
 
-    assert [a["checkpoint_weeks"] for a in record[0]["audits"]] == [1, 2]
+    assert [a.get("checkpoint_days") or a["checkpoint_weeks"] for a in record[0]["audits"]] == [1, 1, 2]
     assert record[0]["audits"][0]["direction_correct"] is False
 
 
@@ -305,6 +305,85 @@ def test_audit_flow_runs_end_to_end_over_a_storage(tmp_path):
     )
 
     assert result["graded"] == [(RUN_ID, 1), (RUN_ID, 2)]
-    assert again == {"graded": [], "failed": []}
-    assert sorted(p.name for p in (tmp_path / "audits" / RUN_ID).iterdir()) == ["1w.json", "2w.json"]
-    assert [a["checkpoint_weeks"] for a in record[0]["audits"]] == [1, 2]
+    assert (again["graded"], again["failed"]) == ([], [])
+    assert sorted(p.name for p in (tmp_path / "audits" / RUN_ID).iterdir()) == ["1d.json", "1w.json", "2w.json"]
+    assert [a.get("checkpoint_days") or a["checkpoint_weeks"] for a in record[0]["audits"]] == [1, 1, 2]
+
+
+# --- 1-day diagnostic checkpoint ------------------------------------------------
+from ags.agents.auditor import find_due_diagnostics
+
+FRIDAY_CALL = "corn_2026-06-05T20-00-00Z"  # Fri 16:00 EDT
+
+
+def _at(day, hour, minute=0):
+    return datetime(2026, 6, day, hour, minute, tzinfo=timezone.utc)
+
+
+def test_a_friday_call_is_diagnosed_off_mondays_close_not_the_weekend(tmp_path):
+    log_dir, audit_dir = _dirs(tmp_path)
+    _write_run(log_dir, FRIDAY_CALL)
+
+    saturday = find_due_diagnostics(log_dir, audit_dir, now=_at(6, 21))
+    monday_before_close = find_due_diagnostics(log_dir, audit_dir, now=_at(8, 20, 59))  # 16:59 EDT
+    monday_at_close = find_due_diagnostics(log_dir, audit_dir, now=_at(8, 21))  # 17:00 EDT
+
+    assert saturday == [] and monday_before_close == []
+    assert monday_at_close == [(FRIDAY_CALL, 1)]
+
+
+def test_a_midweek_call_is_diagnosed_off_the_next_days_close(tmp_path):
+    log_dir, audit_dir = _dirs(tmp_path)
+    _write_run(log_dir, "corn_2026-06-02T20-00-00Z")  # Tue 16:00 EDT
+
+    assert find_due_diagnostics(log_dir, audit_dir, now=_at(3, 20, 59)) == []
+    assert find_due_diagnostics(log_dir, audit_dir, now=_at(3, 21)) == [("corn_2026-06-02T20-00-00Z", 1)]
+
+
+def test_a_graded_diagnostic_or_a_run_without_a_call_is_not_due(tmp_path):
+    log_dir, audit_dir = _dirs(tmp_path)
+    _write_run(log_dir, FRIDAY_CALL)
+    (audit_dir / FRIDAY_CALL).mkdir()
+    (audit_dir / FRIDAY_CALL / "1d.json").write_text(json.dumps({"checkpoint_days": 1}))
+    (log_dir / "wheat_2026-06-05T20-00-00Z.jsonl").write_text(
+        json.dumps({"seq": 0, "agent": "coordinator", "event_type": "output", "payload": {"call": None}}) + "\n"
+    )
+
+    assert find_due_diagnostics(log_dir, audit_dir, now=_at(20, 0)) == []
+
+
+def test_the_weekly_due_scan_does_not_see_the_diagnostic(tmp_path):
+    log_dir, audit_dir = _dirs(tmp_path)
+    _write_run(log_dir, FRIDAY_CALL)
+
+    assert find_due_checkpoints(log_dir, audit_dir, now=_at(8, 21)) == []
+
+
+def test_a_diagnostic_is_graded_off_the_first_session_close_after_a_day_and_marked_as_days(tmp_path):
+    log_dir, _ = _dirs(tmp_path)
+    _write_full_run(log_dir)  # RUN_ID: Fri 2026-06-05 18:30Z (14:30 EDT) -> checkpoint Mon 17:00 EDT
+    closes = [150.0, 148.0, 146.0, 90.0]
+
+    audit = grade_checkpoint(
+        FakeChatClient(VERDICTS), log_dir=log_dir, data_dir=tmp_path / "data", run_id=RUN_ID, days=1,
+        model="stub-model", prices_client=FakePricesClient(_bars(closes)), now=NOW,
+    )
+
+    assert audit["checkpoint_days"] == 1 and "checkpoint_weeks" not in audit
+    assert audit["price_outcome"]["end_date"] == "2026-06-08"  # Monday's session
+    assert audit["price_outcome"]["end_price"] == 148.0
+    assert audit["price_outcome"]["return"] == pytest.approx(148 / 160 - 1)
+    assert audit["direction_correct"] is False
+
+
+def test_run_auditor_writes_1d_json_beside_the_weekly_audits_and_is_idempotent(tmp_path):
+    result, client, audit_dir = _run(tmp_path)
+
+    assert result["graded_diagnostics"] == [(RUN_ID, 1)]
+    assert sorted(p.name for p in (audit_dir / RUN_ID).iterdir()) == ["1d.json", "1w.json", "2w.json"]
+    assert json.loads((audit_dir / RUN_ID / "1d.json").read_text())["checkpoint_days"] == 1
+    assert len(client.calls) == 3
+
+    again, client2, _ = _run(tmp_path)
+
+    assert again["graded_diagnostics"] == [] and client2.calls == []

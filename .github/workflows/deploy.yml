@@ -1,0 +1,64 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+# One deploy at a time; a newer push waits rather than cancelling a half-applied one.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - run: uv run pytest -q
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image (tagged with the commit SHA)
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/ags:${{ github.sha }}"
+          docker build --platform linux/arm64 -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Wait until no cycle is running, so none straddles two image versions
+        run: |
+          ARN=$(aws stepfunctions list-state-machines --query "stateMachines[?name=='ags-cycle'].stateMachineArn | [0]" --output text)
+          if [ "$ARN" != "None" ]; then
+            for i in $(seq 1 60); do
+              RUNNING=$(aws stepfunctions list-executions --state-machine-arn "$ARN" --status-filter RUNNING --query 'length(executions)' --output text)
+              [ "$RUNNING" = "0" ] && exit 0
+              sleep 15
+            done
+            echo "a cycle is still RUNNING after 15 minutes" && exit 1
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform apply
+        working-directory: infra
+        env:
+          TF_VAR_image_tag: ${{ github.sha }}
+          TF_VAR_llm_prices_per_mtok: ${{ vars.LLM_PRICES_PER_MTOK }}
+        run: |
+          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" -backend-config="region=${AWS_REGION}"
+          terraform validate
+          terraform apply -auto-approve

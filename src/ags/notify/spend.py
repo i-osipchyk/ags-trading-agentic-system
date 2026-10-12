@@ -1,0 +1,57 @@
+import json
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from ags.storage import Storage
+
+
+@dataclass(frozen=True)
+class LlmPrices:
+    """$ per million tokens."""
+
+    cache_hit: float
+    cache_miss: float
+    output: float
+
+    def cost(self, usage: dict) -> float:
+        hit = usage.get("prompt_cache_hit_tokens")
+        miss = usage.get("prompt_cache_miss_tokens")
+        if hit is None and miss is None:  # no cache split reported: treat the whole prompt as uncached
+            hit, miss = 0, usage["prompt_tokens"]
+        return (hit * self.cache_hit + miss * self.cache_miss + usage["completion_tokens"] * self.output) / 1e6
+
+
+def _commodity(key: str) -> str:
+    name = key.rsplit("/", 1)[-1]
+    return "portfolio" if key.startswith("portfolio/") else name.split("_", 1)[0]
+
+
+def _empty() -> dict:
+    return {"total": 0.0, "by_agent": defaultdict(float), "by_commodity": defaultdict(float)}
+
+
+def llm_spend(storage: Storage, *, now: datetime, prices: LlmPrices) -> dict:
+    """LLM $ from the per-response usage in run logs: the last 24 h and the calendar month to date."""
+    windows = {"24h": _empty(), "mtd": _empty()}
+    day_ago = now - timedelta(hours=24)
+    for key in storage.list("logs/") + storage.list("portfolio/logs/"):
+        for line in storage.get(key).decode().splitlines():
+            event = json.loads(line)
+            usage = (event.get("payload") or {}).get("usage") if event["event_type"] == "response" else None
+            if not usage:
+                continue
+            at = datetime.fromisoformat(event["timestamp"])
+            cost = prices.cost(usage)
+            member = []
+            if at > day_ago and at <= now:
+                member.append("24h")
+            if (at.year, at.month) == (now.year, now.month) and at <= now:
+                member.append("mtd")
+            for name in member:
+                w = windows[name]
+                w["total"] += cost
+                w["by_agent"][event["agent"]] += cost
+                w["by_commodity"][_commodity(key)] += cost
+    return {k: {"total": v["total"], "by_agent": dict(v["by_agent"]), "by_commodity": dict(v["by_commodity"])}
+            for k, v in windows.items()}

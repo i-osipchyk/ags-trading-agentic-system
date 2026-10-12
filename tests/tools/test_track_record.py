@@ -107,3 +107,22 @@ def test_excludes_audits_graded_after_as_of(tmp_path):
     [run] = read_track_record(log_dir, audit_dir, commodity="corn", lookback_weeks=8, as_of=AS_OF)
 
     assert [a["checkpoint_weeks"] for a in run["audits"]] == [1]
+
+
+def test_includes_the_1_day_diagnostic_before_the_weekly_checkpoints(tmp_path):
+    log_dir, audit_dir = _read(tmp_path)
+    _write_run(log_dir, "corn_2026-05-29T18-30-00Z")
+    _write_audit(audit_dir, "corn_2026-05-29T18-30-00Z", 1)
+    (audit_dir / "corn_2026-05-29T18-30-00Z" / "1d.json").write_text(
+        json.dumps(
+            {
+                "checkpoint_days": 1, "direction_correct": False, "driver_verdicts": [], "calibration_note": "c",
+                "thesis_vs_outcome": "t", "graded_at": "2026-06-01T00:00:00+00:00",
+            }
+        )
+    )
+
+    [run] = read_track_record(log_dir, audit_dir, commodity="corn", lookback_weeks=4, as_of=AS_OF)
+
+    assert [(a.get("checkpoint_days"), a.get("checkpoint_weeks")) for a in run["audits"]] == [(1, None), (None, 1)]
+    assert run["audits"][0]["direction_correct"] is False
