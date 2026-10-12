@@ -12,6 +12,7 @@ from ags.agents.weather import run_weather_analyst
 from ags.llm.loop import ChatClient
 from ags.logging.run_id import generate_run_id
 from ags.logging.run_log import RunLog
+from ags.storage import LocalStorage, as_storage
 from ags.tools.pit_store import ET
 from ags.tools.sources.prices import get_prices
 from ags.tools.track_record import read_track_record
@@ -108,7 +109,20 @@ def run_pipeline(
     usda_client=None,
 ) -> dict:
     run_id = generate_run_id(commodity, trigger_timestamp)
-    run_log = _SharedRunLog(RunLog(log_dir, run_id))
+    log_store = as_storage(log_dir)
+    # Non-local backends buffer the log and upload once; the finally below
+    # guarantees a crashed run still leaves its partial log.
+    raw_log = RunLog(log_store, run_id, buffered=not isinstance(log_store, LocalStorage))
+    try:
+        return _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
+                    log_store, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client)
+    finally:
+        raw_log.close()
+
+
+def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
+         log_dir, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client) -> dict:
+    run_log = _SharedRunLog(raw_log)
     common = {"commodity": commodity, "as_of": as_of, "model": model}
 
     def _client(agent: str) -> LoggingChatClient:

@@ -3,6 +3,8 @@ import tempfile
 from pathlib import Path
 from typing import Protocol
 
+from ags.storage.s3 import S3Storage as S3Storage
+
 
 class Storage(Protocol):
     def get(self, key: str) -> bytes | None: ...

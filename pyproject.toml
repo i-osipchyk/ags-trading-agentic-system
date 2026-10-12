@@ -16,10 +16,12 @@ dependencies = [
     "pyshp>=3.1.6",
     "streamlit>=1.60.0",
     "pypdf>=6.19.0",
+    "boto3>=1.43.111",
 ]
 
 [dependency-groups]
 dev = [
+    "moto[s3]>=5.2.4",
     "pytest>=8.0",
 ]
 

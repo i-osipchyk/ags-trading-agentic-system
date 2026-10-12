@@ -1,11 +1,21 @@
+import boto3
 import pytest
+from moto import mock_aws
 
-from ags.storage import LocalStorage, Prefixed
+from ags.storage import LocalStorage, Prefixed, S3Storage
 
 
-@pytest.fixture(params=["local"])
+@pytest.fixture(params=["local", "s3"])
 def storage(request, tmp_path):
-    return LocalStorage(tmp_path)
+    if request.param == "local":
+        yield LocalStorage(tmp_path)
+        return
+    with mock_aws():
+        boto3.client("s3", region_name="eu-west-1").create_bucket(
+            Bucket="test-bucket",
+            CreateBucketConfiguration={"LocationConstraint": "eu-west-1"},
+        )
+        yield S3Storage("test-bucket", region_name="eu-west-1")
 
 
 def test_get_returns_what_was_put(storage):
@@ -75,3 +85,13 @@ def test_prefixed_view_scopes_keys_to_its_prefix(storage):
     assert scoped.get("x/1.json") == b"1"
     assert scoped.list("x/") == ["x/1.json"]
     assert scoped.put_if_absent("x/1.json", b"2") is False
+
+
+def test_concurrent_put_if_absent_on_one_key_writes_exactly_once(storage):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda i: storage.put_if_absent("race.json", f"w{i}".encode()), range(8)))
+
+    assert results.count(True) == 1
+    assert storage.get("race.json") == f"w{results.index(True)}".encode()

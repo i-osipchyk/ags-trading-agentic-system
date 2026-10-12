@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
@@ -10,16 +11,28 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq,
     ProtoOAApplicationAuthRes,
     ProtoOAErrorRes,
+    ProtoOAGetDynamicLeverageByIDReq,
+    ProtoOAGetDynamicLeverageByIDRes,
     ProtoOAGetTrendbarsReq,
     ProtoOAGetTrendbarsRes,
+    ProtoOASpotEvent,
+    ProtoOASubscribeSpotsReq,
+    ProtoOASymbolByIdReq,
+    ProtoOASymbolByIdRes,
     ProtoOASymbolsListReq,
     ProtoOASymbolsListRes,
+    ProtoOAUnsubscribeSpotsReq,
 )
-from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATrendbarPeriod
+from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
+    ProtoOADayOfWeek,
+    ProtoOASwapCalculationType,
+    ProtoOATrendbarPeriod,
+)
 from twisted.internet.defer import Deferred
 from twisted.python.failure import Failure
 
 from ags.config import Config
+from ags.storage import as_storage
 from ags.tools.pit_store import ET, end_of_day, read_pit, write_pit
 
 SOURCE = "ctrader"
@@ -61,6 +74,50 @@ def _parse_bar(bar) -> dict:
         "low": low,
         "close": low + bar.deltaClose / _PRICE_SCALE,
         "volume": bar.volume,
+    }
+
+
+def parse_symbol_specs(symbol, leverage) -> dict:
+    """Flatten a ProtoOASymbol (+ its ProtoOADynamicLeverage) to plain values.
+
+    cTrader sends leverage in hundredths (2000 = 20:1); margin_rate is the
+    reciprocal of the first tier's leverage.
+    """
+    tiers = [{"volume": t.volume, "leverage": t.leverage / 100} for t in leverage.tiers]
+    return {
+        "symbol_id": symbol.symbolId,
+        "lot_size": symbol.lotSize,
+        "min_volume": symbol.minVolume,
+        "step_volume": symbol.stepVolume,
+        "max_volume": symbol.maxVolume,
+        "swap_long": symbol.swapLong,
+        "swap_short": symbol.swapShort,
+        "swap_type": ProtoOASwapCalculationType.Name(symbol.swapCalculationType),
+        "triple_swap_day": ProtoOADayOfWeek.Name(symbol.swapRollover3Days),
+        "digits": symbol.digits,
+        "margin_rate": 1 / tiers[0]["leverage"],
+        "leverage_tiers": tiers,
+    }
+
+
+def parse_h1_bar(bar) -> dict:
+    low = bar.low
+    return {
+        "timestamp": datetime.fromtimestamp(bar.utcTimestampInMinutes * 60, tz=timezone.utc).isoformat(),
+        "open": round((low + bar.deltaOpen) / _PRICE_SCALE, 5),
+        "high": round((low + bar.deltaHigh) / _PRICE_SCALE, 5),
+        "low": round(low / _PRICE_SCALE, 5),
+        "close": round((low + bar.deltaClose) / _PRICE_SCALE, 5),
+        "volume": bar.volume,
+    }
+
+
+def parse_quote(event) -> dict:
+    return {
+        "symbol_id": event.symbolId,
+        "bid": event.bid / _PRICE_SCALE,
+        "ask": event.ask / _PRICE_SCALE,
+        "timestamp": datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc).isoformat(),
     }
 
 
@@ -113,7 +170,12 @@ class CTraderPricesClient:
             self._resolve(Protobuf.extract(message))
             return
 
-        if message.payloadType == ProtoOAGetTrendbarsRes().payloadType:
+        if message.payloadType in (
+            ProtoOAGetTrendbarsRes().payloadType,
+            ProtoOASymbolByIdRes().payloadType,
+            ProtoOAGetDynamicLeverageByIDRes().payloadType,
+            ProtoOASpotEvent().payloadType,
+        ):
             self._resolve(Protobuf.extract(message))
             return
 
@@ -168,6 +230,59 @@ class CTraderPricesClient:
 
         res = _do()
         return [_parse_bar(bar) for bar in res.trendbar]
+
+    def _request(self, request):
+        @crochet.wait_for(timeout=self._timeout)
+        def _do():
+            self._pending = Deferred()
+            self._client.send(request)
+            return self._pending
+
+        return _do()
+
+    def get_symbol_specs(self, symbol_name: str) -> dict:
+        account = self._config.ctrader_account_id
+        by_id = ProtoOASymbolByIdReq(ctidTraderAccountId=account)
+        by_id.symbolId.append(self._symbol_id(symbol_name))
+        symbol = self._request(by_id).symbol[0]
+        leverage = self._request(
+            ProtoOAGetDynamicLeverageByIDReq(ctidTraderAccountId=account, leverageId=symbol.leverageId)
+        ).leverage
+        return parse_symbol_specs(symbol, leverage)
+
+    def get_quote(self, symbol_name: str) -> dict:
+        """Subscribe, take the first tick carrying both sides, unsubscribe."""
+        account = self._config.ctrader_account_id
+        symbol_id = self._symbol_id(symbol_name)
+        subscribe = ProtoOASubscribeSpotsReq(ctidTraderAccountId=account)
+        subscribe.symbolId.append(symbol_id)
+        unsubscribe = ProtoOAUnsubscribeSpotsReq(ctidTraderAccountId=account)
+        unsubscribe.symbolId.append(symbol_id)
+        try:
+            event = self._request(subscribe)
+            while not (event.bid and event.ask):
+                event = self._wait_next()
+        finally:
+            self._client.send(unsubscribe)
+        return parse_quote(event)
+
+    def _wait_next(self):
+        @crochet.wait_for(timeout=self._timeout)
+        def _do():
+            self._pending = Deferred()
+            return self._pending
+
+        return _do()
+
+    def get_h1_bars(self, symbol_name: str, start: datetime, end: datetime) -> list[dict]:
+        request = ProtoOAGetTrendbarsReq(
+            ctidTraderAccountId=self._config.ctrader_account_id,
+            period=ProtoOATrendbarPeriod.H1,
+            symbolId=self._symbol_id(symbol_name),
+            fromTimestamp=int(start.timestamp() * 1000),
+            toTimestamp=int(end.timestamp() * 1000),
+        )
+        return [parse_h1_bar(bar) for bar in self._request(request).trendbar]
 
     def close(self) -> None:
         """Tear down the connection. Must be called when done with a client
@@ -257,3 +372,139 @@ def get_prices(
                 bars_by_date[missing_day] = bar
 
     return [{**bars_by_date[d], "date": _session_date(d).isoformat()} for d in sorted(bars_by_date)]
+
+
+SPECS_REPORT = "symbol_specs"
+
+
+class MarketDataClient(Protocol):
+    def get_symbol_specs(self, symbol_name: str) -> dict: ...
+
+
+def get_symbol_specs(
+    data_dir: Path,
+    *,
+    commodity: str,
+    as_of: datetime,
+    client: MarketDataClient | None = None,
+    now: datetime | None = None,
+) -> dict | None:
+    """Symbol specs as known at `as_of`; refetched at most once per ET day.
+
+    Stored PIT under the fetch instant (not just the date, which would only
+    become visible at end of day) so a later cycle the same day sees it. An
+    `as_of` on a past day only reads what was stored — specs can't be fetched
+    retroactively.
+    """
+    if as_of.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    now = now or datetime.now(timezone.utc)
+    cutoff = min(as_of, now)
+    known = read_pit(data_dir, source=SOURCE, report=SPECS_REPORT, symbol=commodity, as_of=cutoff)
+    today = cutoff.astimezone(ET).date()
+    is_live = as_of.astimezone(ET).date() == now.astimezone(ET).date()
+    if known is not None and datetime.fromisoformat(known["fetched_at"]).astimezone(ET).date() == today:
+        return known["specs"]
+    if not is_live:
+        return known["specs"] if known is not None else None
+
+    owns_client = client is None
+    if client is None:
+        client = CTraderPricesClient(Config.from_env())
+    try:
+        specs = client.get_symbol_specs(CTRADER_SYMBOL_NAMES[commodity])
+    finally:
+        if owns_client:
+            client.close()
+    write_pit(
+        data_dir, source=SOURCE, report=SPECS_REPORT, symbol=commodity, release_date=cutoff,
+        content={"fetched_at": cutoff.isoformat(), "specs": specs},
+    )
+    return specs
+
+
+QUOTES_REPORT = "quotes"
+
+
+def get_quote(
+    data_dir: Path,
+    *,
+    commodity: str,
+    as_of: datetime,
+    client: MarketDataClient | None = None,
+    now: datetime | None = None,
+) -> dict | None:
+    """Bid/ask snapshot as of `as_of`, stored PIT under its capture instant.
+
+    A call at the present (`as_of >= now`) captures a fresh quote; any earlier
+    `as_of` only reads the latest quote already captured by then.
+    """
+    if as_of.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    now = now or datetime.now(timezone.utc)
+    if as_of < now:
+        return read_pit(data_dir, source=SOURCE, report=QUOTES_REPORT, symbol=commodity, as_of=as_of)
+
+    owns_client = client is None
+    if client is None:
+        client = CTraderPricesClient(Config.from_env())
+    try:
+        quote = client.get_quote(CTRADER_SYMBOL_NAMES[commodity])
+    finally:
+        if owns_client:
+            client.close()
+    write_pit(data_dir, source=SOURCE, report=QUOTES_REPORT, symbol=commodity, release_date=now, content=quote)
+    return quote
+
+
+H1_REPORT = "h1_bars"
+
+
+def get_h1_bars(
+    data_dir: Path,
+    *,
+    commodity: str,
+    start: datetime,
+    end: datetime,
+    as_of: datetime,
+    client: MarketDataClient | None = None,
+    now: datetime | None = None,
+) -> list[dict]:
+    """Completed H1 bars with open time in [start, end), as known at `as_of`.
+
+    Each live fetch is stored PIT under its capture instant, along with how far
+    it covers; a call only fetches the hours after what earlier captures
+    already cover. A bar is returned only once its hour has closed, and only
+    from captures made at or before `as_of`.
+    """
+    if as_of.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    now = now or datetime.now(timezone.utc)
+    cutoff = min(as_of, now)
+    horizon = cutoff.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+    store = as_storage(data_dir)
+    prefix = f"{SOURCE}/{H1_REPORT}/{commodity}/"
+    captures = [json.loads(store.get(key)) for key in store.list(prefix) if key.endswith(".json")]
+    captures = [c for c in captures if datetime.fromisoformat(c["captured_at"]) <= cutoff]
+    covered = max((datetime.fromisoformat(c["covers_until"]) for c in captures), default=None)
+
+    if as_of >= now and (covered is None or covered < horizon):
+        owns_client = client is None
+        if client is None:
+            client = CTraderPricesClient(Config.from_env())
+        try:
+            fetched = client.get_h1_bars(CTRADER_SYMBOL_NAMES[commodity], covered or start, horizon)
+        finally:
+            if owns_client:
+                client.close()
+        capture = {"captured_at": now.isoformat(), "covers_until": horizon.isoformat(), "bars": fetched}
+        write_pit(data_dir, source=SOURCE, report=H1_REPORT, symbol=commodity, release_date=now, content=capture)
+        captures.append(capture)
+
+    by_open = {b["timestamp"]: b for c in captures for b in c["bars"]}
+    return [
+        b
+        for b in sorted(by_open.values(), key=lambda b: b["timestamp"])
+        if start <= datetime.fromisoformat(b["timestamp"]) < min(end, horizon)
+    ]

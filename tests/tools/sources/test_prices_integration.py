@@ -42,3 +42,26 @@ def test_get_prices_pulls_corn_from_real_ctrader_and_second_call_is_a_noop(tmp_p
 
     assert second == first
     assert len(calls) == 1, "second call for the same range must be a cache no-op, not a second fetch"
+
+
+@pytest.mark.integration
+def test_market_data_for_the_book_pulls_specs_quote_and_h1_bars_for_one_symbol(tmp_path):
+    from datetime import datetime, timezone
+
+    from ags.tools.sources.prices import get_h1_bars, get_quote, get_symbol_specs
+
+    client = CTraderPricesClient(Config.from_env())
+    try:
+        now = datetime.now(timezone.utc)
+        specs = get_symbol_specs(tmp_path, commodity="corn", as_of=now, client=client, now=now)
+        quote = get_quote(tmp_path, commodity="corn", as_of=now, client=client, now=now)
+        bars = get_h1_bars(
+            tmp_path, commodity="corn", start=now - timedelta(days=3), end=now, as_of=now, client=client, now=now
+        )
+    finally:
+        client.close()
+
+    assert specs["lot_size"] > 0 and specs["min_volume"] > 0 and specs["margin_rate"] > 0
+    assert 0 < quote["bid"] <= quote["ask"]
+    assert bars, "expected H1 bars in the last 3 days"
+    assert list((tmp_path / prices.SOURCE).rglob("*.json"))
