@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
+from ags.llm.client import trace
 from ags.llm.loop import ChatClient
 from ags.logging.run_log import RunLog
 from ags.pipeline import LoggingChatClient
@@ -87,10 +88,12 @@ def run_portfolio(
     # Same upload-once-in-a-finally treatment as a commodity run's log on non-local storage.
     log = RunLog(storage, f"portfolio/logs/{cycle_id}", buffered=not isinstance(storage, LocalStorage))
     try:
-        return _run_portfolio(
-            cycle_id, calls, storage, log, as_of=as_of, now=now, chat_client=chat_client, model=model,
-            market_client=market_client, config=config, breaker_reset_at=breaker_reset_at, off_schedule=off_schedule,
-        )
+        with trace(chat_client, cycle_id):
+            return _run_portfolio(
+                cycle_id, calls, storage, log, as_of=as_of, now=now, chat_client=chat_client, model=model,
+                market_client=market_client, config=config, breaker_reset_at=breaker_reset_at,
+                off_schedule=off_schedule,
+            )
     finally:
         log.close()
 
@@ -136,7 +139,7 @@ def _run_portfolio(
         book_state = {"equity": snapshot["equity"], "lots": lots}
         if name == "manager":
             manager_out = run_portfolio_manager(
-                LoggingChatClient(chat_client, log, "manager"), as_of=as_of, model=model, calls=calls, lots=lots, risk=risk,
+                LoggingChatClient(chat_client, log, "manager", cycle_id=cycle_id), as_of=as_of, model=model, calls=calls, lots=lots, risk=risk,
                 equity=snapshot["equity"], free_margin=snapshot["free_margin"],
             )
             proposal = manager_out["proposal"]

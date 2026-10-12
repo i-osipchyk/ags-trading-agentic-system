@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Pull-only mirror of the official S3 record into data/, logs/, audits/ and portfolio/.
 # Nothing here ever writes to the bucket: S3 is the source of truth, local is a read-only copy.
-# Usage: AGS_BUCKET=ags-data-123456789012 scripts/sync_local.sh [--dryrun]
+# Usage: scripts/sync_local.sh [--dryrun]   (AGS_BUCKET overrides the default ags-live-data-<account>)
 set -euo pipefail
 
-: "${AGS_BUCKET:?set AGS_BUCKET to the data bucket name}"
+export AWS_REGION="${AWS_REGION:-eu-west-1}"
+AGS_BUCKET="${AGS_BUCKET:-ags-live-data-$(aws sts get-caller-identity --query Account --output text)}"
 cd "$(dirname "$0")/.."
 
 DRYRUN="${1:-}"

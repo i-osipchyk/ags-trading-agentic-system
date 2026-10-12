@@ -1,9 +1,68 @@
-import json
+"""Environment loading and the typed Config built from it.
+
+Locally: values come from .env (gitignored; see .env.example).
+On Lambda: SSM parameters under SECRETS_PATH (/ags/<env>) and SHARED_SECRETS_PATH
+(/platform/shared) are copied into os.environ, kebab-case name -> UPPER_SNAKE, e.g.
+/ags/live/deepseek-api-key -> DEEPSEEK_API_KEY (platform docs/conventions.md § Secrets).
+
+AWS_REGION is always set afterwards: from the environment / .env (Lambda sets it itself), else
+DEFAULT_AWS_REGION. AWS_DEFAULT_REGION mirrors it, so every boto3 client agrees.
+"""
+
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
+
+DEFAULT_AWS_REGION = "eu-west-1"
+
+
+def load_env(dotenv_path: str | Path | None = None, *, refresh: bool = False) -> None:
+    """Load .env locally, or the SSM parameters on Lambda.
+
+    `refresh=True` re-reads SSM and overwrites what an earlier load put in os.environ: a warm
+    container must see a cTrader token that token_refresh rotated after its cold start.
+    """
+    on_lambda = bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+    if not on_lambda:
+        load_dotenv(dotenv_path)
+    os.environ.setdefault("AWS_REGION", DEFAULT_AWS_REGION)
+    os.environ.setdefault("AWS_DEFAULT_REGION", os.environ["AWS_REGION"])
+    if on_lambda:
+        _load_ssm(overwrite=refresh)
+
+
+def _load_ssm(*, overwrite: bool) -> None:
+    import boto3
+
+    ssm = boto3.client("ssm")
+    for path in filter(None, (os.getenv("SHARED_SECRETS_PATH"), os.getenv("SECRETS_PATH"))):
+        for key, value in read_parameters(ssm, path).items():
+            if overwrite:
+                os.environ[key] = value
+            else:
+                os.environ.setdefault(key, value)
+
+
+def read_parameters(ssm, path: str) -> dict[str, str]:
+    """Every parameter directly under `path`, decrypted, keyed by its UPPER_SNAKE env var name."""
+    values = {}
+    for page in ssm.get_paginator("get_parameters_by_path").paginate(
+        Path=path, Recursive=False, WithDecryption=True
+    ):
+        for p in page["Parameters"]:
+            values[env_name(p["Name"].rsplit("/", 1)[-1])] = p["Value"]
+    return values
+
+
+def env_name(parameter: str) -> str:
+    return parameter.replace("-", "_").upper()
+
+
+def parameter_name(env_key: str) -> str:
+    return env_key.lower().replace("_", "-")
 
 
 class ConfigError(Exception):
@@ -42,15 +101,9 @@ class Config:
     telegram_chat_id: str = ""
 
     @classmethod
-    def from_env(cls) -> "Config":
-        load_dotenv()
+    def from_env(cls, *, refresh: bool = False) -> "Config":
+        load_env(refresh=refresh)
         return cls.from_mapping(os.environ)
-
-    @classmethod
-    def from_secret(cls, secrets_client, secret_id: str) -> "Config":
-        """Lambda path: one Secrets Manager secret (JSON of the same keys), read per cold start."""
-        secret = json.loads(secrets_client.get_secret_value(SecretId=secret_id)["SecretString"])
-        return cls.from_mapping(secret)
 
     @classmethod
     def from_mapping(cls, env: Mapping[str, str]) -> "Config":

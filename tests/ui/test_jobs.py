@@ -122,8 +122,9 @@ from ags.ui.jobs import COMMODITIES, audit_commands, pipeline_commands
 
 
 def _args(commands):
-    # Drop the interpreter and reduce the script to its file name.
-    return [[Path(c[1]).name, *c[2:]] for c in commands]
+    # Drop the interpreter and reduce the script to its path under the repo root.
+    root = Path(__file__).resolve().parents[2]
+    return [[Path(c[1]).relative_to(root).as_posix(), *c[2:]] for c in commands]
 
 
 def test_the_universe_is_the_seven_fixed_commodities():
@@ -133,13 +134,13 @@ def test_the_universe_is_the_seven_fixed_commodities():
 def test_pipeline_commands_run_the_cli_once_per_commodity_with_no_as_of_override():
     commands = pipeline_commands(["corn", "wheat"])
 
-    assert _args(commands) == [["run_pipeline.py", "--commodity", "corn"], ["run_pipeline.py", "--commodity", "wheat"]]
+    assert _args(commands) == [["scripts/run_pipeline.py", "--commodity", "corn"], ["scripts/run_pipeline.py", "--commodity", "wheat"]]
 
 
 def test_audit_commands_grade_everything_due_or_one_checkpoint():
-    assert _args(audit_commands()) == [["run_auditor.py"]]
+    assert _args(audit_commands()) == [["scripts/run_auditor.py"]]
     assert _args(audit_commands(run_id="corn_2026-10-01T18-30-00Z", weeks=1)) == [
-        ["run_auditor.py", "--run-id", "corn_2026-10-01T18-30-00Z", "--weeks", "1"]
+        ["scripts/run_auditor.py", "--run-id", "corn_2026-10-01T18-30-00Z", "--weeks", "1"]
     ]
 
 

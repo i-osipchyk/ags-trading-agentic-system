@@ -44,10 +44,9 @@ def check_late_start(event: dict, now: datetime) -> None:
         raise LateStartError(f"started {now - scheduled} after scheduled_time {event['scheduled_time']}")
 
 
-def build_runtime(env, *, secrets_client, ssm_client, chat_factory, market_factory, alert_factory=None) -> Runtime:
+def build_runtime(env, *, config: Config, ssm_client, chat_factory, market_factory, alert_factory=None) -> Runtime:
     """Wire a Lambda's dependencies. The real clients are passed in as factories so tests never connect out."""
-    config = Config.from_secret(secrets_client, env["AGS_SECRET_ID"])
-    param = env.get("AGS_BREAKER_PARAM", "/ags/breaker_reset_at")
+    param = env["AGS_BREAKER_PARAM"]
 
     def breaker_reset_at() -> datetime | None:
         try:
@@ -57,7 +56,7 @@ def build_runtime(env, *, secrets_client, ssm_client, chat_factory, market_facto
         return datetime.fromisoformat(value) if value and value != "none" else None
 
     return Runtime(
-        config=config, storage=S3Storage(env["AGS_BUCKET"], region_name=env.get("AWS_REGION")),
+        config=config, storage=S3Storage(env["AGS_BUCKET"]),
         chat_client=chat_factory(config), model=config.deepseek_model, market_client=market_factory(config),
         now=lambda: datetime.now(timezone.utc), portfolio_config=PortfolioConfig.from_mapping(env),
         breaker_reset_at=breaker_reset_at, alert=alert_factory(config) if alert_factory else (lambda message: None),

@@ -2,11 +2,9 @@ import json
 from datetime import datetime, timezone
 
 from ags.notify.digest import compose_digest
-from ags.notify.spend import LlmPrices
 from ags.storage import LocalStorage
 
 NOW = datetime(2026, 6, 10, 21, 0, tzinfo=timezone.utc)  # 17:00 ET
-PRICES = LlmPrices(cache_hit=0.1, cache_miss=1.0, output=2.0)
 
 CALLS = {
     "corn": {"call": "bullish", "conviction": 4}, "soybeans": {"call": "bearish", "conviction": 3},
@@ -44,16 +42,15 @@ def _cycle(storage, book, cycle_id, equity, free_margin, lots):
     }).encode())
 
 
-def _response(agent, miss=0, out=0, hit=0):
+def _response(agent, cost):
     return json.dumps({"agent": agent, "event_type": "response", "timestamp": "2026-06-10T08:00:00+00:00", "payload": {
-        "usage": {"prompt_tokens": hit + miss, "completion_tokens": out,
-                  "prompt_cache_hit_tokens": hit, "prompt_cache_miss_tokens": miss}}})
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost_usd": cost}}})
 
 
 def _fixture(tmp_path):
     storage = LocalStorage(tmp_path)
     storage.put("logs/corn_2026-06-10T08-00-00Z.jsonl", (
-        _response("technical", hit=1_000_000, miss=1_000_000, out=1_000_000) + "\n" + _response("coordinator", miss=500_000) + "\n"
+        _response("technical", 3.1) + "\n" + _response("coordinator", 0.5) + "\n"
     ).encode())
     zero = {c: 0.0 for c in CALLS}
     _cycle(storage, "manager", "cycle_2026-06-09T20-00-00Z", 10_000.0, 9_500.0, zero)
@@ -64,7 +61,7 @@ def _fixture(tmp_path):
 
 
 def test_digest_matches_the_golden_text(tmp_path):
-    text = compose_digest(_fixture(tmp_path), now=NOW, prices=PRICES, aws_cost=lambda: ("2026-06-09", 1.23))
+    text = compose_digest(_fixture(tmp_path), now=NOW, aws_cost=lambda: ("2026-06-09", 1.23))
 
     assert text == GOLDEN
 
@@ -73,7 +70,7 @@ def test_digest_still_renders_when_cost_explorer_or_cycles_are_unavailable(tmp_p
     def broken():
         raise RuntimeError("ce down")
 
-    text = compose_digest(LocalStorage(tmp_path), now=NOW, prices=PRICES, aws_cost=broken)
+    text = compose_digest(LocalStorage(tmp_path), now=NOW, aws_cost=broken)
 
     assert "AWS: unavailable" in text
     assert "No scheduled cycle yet" in text

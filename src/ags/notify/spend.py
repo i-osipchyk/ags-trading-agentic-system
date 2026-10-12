@@ -1,25 +1,11 @@
 import json
 from collections import defaultdict
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ags.storage import Storage
 
-
-@dataclass(frozen=True)
-class LlmPrices:
-    """$ per million tokens."""
-
-    cache_hit: float
-    cache_miss: float
-    output: float
-
-    def cost(self, usage: dict) -> float:
-        hit = usage.get("prompt_cache_hit_tokens")
-        miss = usage.get("prompt_cache_miss_tokens")
-        if hit is None and miss is None:  # no cache split reported: treat the whole prompt as uncached
-            hit, miss = 0, usage["prompt_tokens"]
-        return (hit * self.cache_hit + miss * self.cache_miss + usage["completion_tokens"] * self.output) / 1e6
+# The $ come from llmkit (platform price table, priced at each call's start time), stored with the
+# token usage of every logged response. There is deliberately no second price table here.
 
 
 def _commodity(key: str) -> str:
@@ -28,11 +14,15 @@ def _commodity(key: str) -> str:
 
 
 def _empty() -> dict:
-    return {"total": 0.0, "by_agent": defaultdict(float), "by_commodity": defaultdict(float)}
+    return {"total": 0.0, "unpriced": 0, "by_agent": defaultdict(float), "by_commodity": defaultdict(float)}
 
 
-def llm_spend(storage: Storage, *, now: datetime, prices: LlmPrices) -> dict:
-    """LLM $ from the per-response usage in run logs: the last 24 h and the calendar month to date."""
+def llm_spend(storage: Storage, *, now: datetime) -> dict:
+    """LLM $ from the per-response usage in run logs: the last 24 h and the calendar month to date.
+
+    A response whose model llmkit has no price for (`cost_usd` null or absent) is counted under
+    `unpriced` rather than guessed.
+    """
     windows = {"24h": _empty(), "mtd": _empty()}
     day_ago = now - timedelta(hours=24)
     for key in storage.list("logs/") + storage.list("portfolio/logs/"):
@@ -42,7 +32,7 @@ def llm_spend(storage: Storage, *, now: datetime, prices: LlmPrices) -> dict:
             if not usage:
                 continue
             at = datetime.fromisoformat(event["timestamp"])
-            cost = prices.cost(usage)
+            cost = usage.get("cost_usd")
             member = []
             if at > day_ago and at <= now:
                 member.append("24h")
@@ -50,8 +40,12 @@ def llm_spend(storage: Storage, *, now: datetime, prices: LlmPrices) -> dict:
                 member.append("mtd")
             for name in member:
                 w = windows[name]
+                if cost is None:
+                    w["unpriced"] += 1
+                    continue
                 w["total"] += cost
                 w["by_agent"][event["agent"]] += cost
                 w["by_commodity"][_commodity(key)] += cost
-    return {k: {"total": v["total"], "by_agent": dict(v["by_agent"]), "by_commodity": dict(v["by_commodity"])}
+    return {k: {"total": v["total"], "unpriced": v["unpriced"], "by_agent": dict(v["by_agent"]),
+                "by_commodity": dict(v["by_commodity"])}
             for k, v in windows.items()}

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-import run_auditor
+from scripts import run_auditor
 
 
 def test_main_takes_no_arguments_and_audits_the_repo_logs_and_audits_dirs(monkeypatch, capsys):
@@ -12,7 +12,7 @@ def test_main_takes_no_arguments_and_audits_the_repo_logs_and_audits_dirs(monkey
         deepseek_model = "stub-model"
 
     monkeypatch.setattr(run_auditor.Config, "from_env", classmethod(lambda cls: FakeConfig()))
-    monkeypatch.setattr(run_auditor, "DeepSeekChatClient", lambda config: "client")
+    monkeypatch.setattr(run_auditor, "LLMClient", lambda: "client")
 
     def fake_run_auditor(client, **kwargs):
         seen["client"], seen["kwargs"] = client, kwargs
@@ -22,7 +22,7 @@ def test_main_takes_no_arguments_and_audits_the_repo_logs_and_audits_dirs(monkey
 
     run_auditor.main([])
 
-    root = Path(run_auditor.__file__).parent
+    root = Path(run_auditor.__file__).resolve().parents[1]
     assert seen["client"] == "client"
     assert seen["kwargs"]["log_dir"] == root / "logs"
     assert seen["kwargs"]["audit_dir"] == root / "audits"
@@ -40,7 +40,7 @@ def _stub(monkeypatch):
         deepseek_model = "stub-model"
 
     monkeypatch.setattr(run_auditor.Config, "from_env", classmethod(lambda cls: FakeConfig()))
-    monkeypatch.setattr(run_auditor, "DeepSeekChatClient", lambda config: "client")
+    monkeypatch.setattr(run_auditor, "LLMClient", lambda: "client")
     monkeypatch.setattr(run_auditor, "run_auditor", lambda client, **kw: seen.update(kw) or {"graded": [], "failed": []})
     return seen
 

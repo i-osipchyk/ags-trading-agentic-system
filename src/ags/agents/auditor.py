@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from ags.llm.client import bind, trace
 from ags.llm.loop import ChatClient, run_loop
 from ags.storage import Storage, as_storage
 from ags.tools.pit_store import ET
@@ -213,7 +214,10 @@ def grade_checkpoint(
         + "\n\nPrice outcome (code-computed, including the daily closes since the call):\n"
         + json.dumps(price_outcome, indent=2)
     )
-    loop_result = run_loop(chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=[])
+    checkpoint = f"{weeks}w" if weeks else f"{days}d"
+    client = bind(chat_client, "auditor", commodity=commodity, run_id=run_id, checkpoint=checkpoint)
+    with trace(chat_client, f"audit-{run_id}-{checkpoint}"):
+        loop_result = run_loop(client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=[])
     parsed = json.loads(loop_result.content)
     _validate_verdicts(parsed)
 

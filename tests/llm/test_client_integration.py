@@ -1,14 +1,14 @@
 import pytest
 
 from ags.config import Config
-from ags.llm.deepseek_client import DeepSeekChatClient
+from ags.llm.client import LLMClient
 from ags.llm.loop import ToolSpec, run_loop
 
 
 @pytest.mark.integration
 def test_run_loop_against_real_deepseek_with_one_trivial_tool():
     config = Config.from_env()
-    client = DeepSeekChatClient(config)
+    client = LLMClient().bind("integration-test")
 
     add_calls = []
 

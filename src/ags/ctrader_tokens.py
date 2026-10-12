@@ -1,5 +1,6 @@
-import json
 from datetime import datetime, timedelta
+
+from ags.config import parameter_name, read_parameters
 
 REFRESH_WINDOW = timedelta(days=7)
 
@@ -9,7 +10,7 @@ class TokenRefreshError(Exception):
 
 
 def refresh_if_due(secret_store, token_endpoint, *, now: datetime) -> str:
-    """Refresh the cTrader tokens held in the secret when they expire within 7 days. Returns the outcome."""
+    """Refresh the cTrader tokens held in the secret store when they expire within 7 days. Returns the outcome."""
     secret = secret_store.read()
     expires_at = secret.get("CTRADER_ACCESS_TOKEN_EXPIRES_AT")
     if expires_at and datetime.fromisoformat(expires_at) - now > REFRESH_WINDOW:
@@ -23,24 +24,30 @@ def refresh_if_due(secret_store, token_endpoint, *, now: datetime) -> str:
         raise TokenRefreshError(f"{type(exc).__name__}: {exc}") from exc
     if response.get("errorCode"):
         raise TokenRefreshError(f"{response['errorCode']}: {response.get('description')}")
+    # Only the rotated keys are written; the refresh token first, since the old one is now spent.
     secret_store.write({
-        **secret,
-        "CTRADER_ACCESS_TOKEN": response["accessToken"],
         "CTRADER_REFRESH_TOKEN": response["refreshToken"],
+        "CTRADER_ACCESS_TOKEN": response["accessToken"],
         "CTRADER_ACCESS_TOKEN_EXPIRES_AT": (now + timedelta(seconds=response["expiresIn"])).isoformat(),
     })
     return "refreshed"
 
 
-class SecretsManagerStore:
-    """The one JSON secret holding every credential; written back whole so unrelated keys survive."""
+class SsmSecretStore:
+    """The SSM parameters under /ags/<env>/ (SecureStrings), read and written as UPPER_SNAKE keys.
 
-    def __init__(self, client, secret_id: str) -> None:
+    `write` puts only the keys it is given, so unrelated secrets are never touched.
+    """
+
+    def __init__(self, client, path: str) -> None:
         self._client = client
-        self._secret_id = secret_id
+        self._path = path.rstrip("/")
 
     def read(self) -> dict:
-        return json.loads(self._client.get_secret_value(SecretId=self._secret_id)["SecretString"])
+        return read_parameters(self._client, self._path)
 
     def write(self, values: dict) -> None:
-        self._client.put_secret_value(SecretId=self._secret_id, SecretString=json.dumps(values))
+        for key, value in values.items():
+            self._client.put_parameter(
+                Name=f"{self._path}/{parameter_name(key)}", Value=value, Type="SecureString", Overwrite=True
+            )

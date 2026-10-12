@@ -9,6 +9,7 @@ from ags.agents.news import run_news_analyst
 from ags.agents.supply_demand import run_supply_demand_analyst
 from ags.agents.technical import run_technical_analyst
 from ags.agents.weather import run_weather_analyst
+from ags.llm.client import bind, trace
 from ags.llm.loop import ChatClient
 from ags.logging.run_id import generate_run_id
 from ags.logging.run_log import RunLog
@@ -34,12 +35,13 @@ class _SharedRunLog:
 class LoggingChatClient:
     """Wraps a ChatClient, recording one agent's prompts, raw replies, tool calls and tool results.
 
-    The loop sends the full message history on every call, so what is new
+    The inner client is bound to the agent as the llmkit component, with `metadata` (commodity,
+    run_id) on every call record. The loop sends the full message history on every call, so what is new
     since the previous call (tool results, the cap-hit nudge) is what gets logged.
     """
 
-    def __init__(self, inner: ChatClient, run_log: _SharedRunLog, agent: str) -> None:
-        self._inner = inner
+    def __init__(self, inner: ChatClient, run_log: _SharedRunLog, agent: str, **metadata) -> None:
+        self._inner = bind(inner, agent, **metadata)
         self._run_log = run_log
         self._agent = agent
         self._seen = 0
@@ -114,8 +116,9 @@ def run_pipeline(
     # guarantees a crashed run still leaves its partial log.
     raw_log = RunLog(log_store, run_id, buffered=not isinstance(log_store, LocalStorage))
     try:
-        return _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
-                    log_store, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client)
+        with trace(chat_client, run_id):
+            return _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
+                        log_store, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client)
     finally:
         raw_log.close()
 
@@ -126,7 +129,7 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
     common = {"commodity": commodity, "as_of": as_of, "model": model}
 
     def _client(agent: str) -> LoggingChatClient:
-        return LoggingChatClient(chat_client, run_log, agent)
+        return LoggingChatClient(chat_client, run_log, agent, commodity=commodity, run_id=run_id)
 
     analysts = {
         "technical": lambda: run_technical_analyst(

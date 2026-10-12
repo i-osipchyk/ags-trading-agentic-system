@@ -231,4 +231,8 @@ __marimo__/
 .terraform/
 *.tfstate
 *.tfstate.*
+tfplan
+plan.txt
 crash.log
+# Terraform per-env vars (the Python venv patterns above would hide them)
+!/infra/env/

@@ -94,16 +94,16 @@ def current_job(
 
 def pipeline_commands(commodities: list[str]) -> list[list[str]]:
     # No --as-of: UI runs are always "today", so backtests stay a deliberate CLI-only act.
-    return [[sys.executable, str(_ROOT / "run_pipeline.py"), "--commodity", c] for c in commodities]
+    return [[sys.executable, str(_ROOT / "scripts" / "run_pipeline.py"), "--commodity", c] for c in commodities]
 
 
 def audit_commands(*, run_id: str | None = None, weeks: int | None = None) -> list[list[str]]:
-    command = [sys.executable, str(_ROOT / "run_auditor.py")]
+    command = [sys.executable, str(_ROOT / "scripts" / "run_auditor.py")]
     if run_id is not None:
         command += ["--run-id", run_id, "--weeks", str(weeks)]
     return [command]
 
 
 def produced_run_ids(output: str) -> list[str]:
-    """Run ids a pipeline job reported, from the `run_id: ...` lines run_pipeline.py prints."""
+    """Run ids a pipeline job reported, from the `run_id: ...` lines scripts/run_pipeline.py prints."""
     return [line.split(":", 1)[1].strip() for line in output.splitlines() if line.startswith("run_id:")]

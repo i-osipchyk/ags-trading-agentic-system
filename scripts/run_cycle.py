@@ -11,14 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ags.config import Config
-from ags.llm.deepseek_client import DeepSeekChatClient
+from ags.llm.client import LLMClient
 from ags.pipeline import run_pipeline
 from ags.portfolio.guardrails import GuardrailConfig
 from ags.portfolio.stage import COMMODITIES, PortfolioConfig, run_portfolio
 from ags.storage import LocalStorage, Prefixed
 from ags.tools.sources.prices import CTraderPricesClient
 
-_ROOT = Path(__file__).parent
+_ROOT = Path(__file__).resolve().parents[1]  # repo root
 _LOCAL = _ROOT / "local"
 
 
@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> None:
     config = Config.from_env()
     now = datetime.now(timezone.utc)
     storage = LocalStorage(_LOCAL)
-    chat_client = DeepSeekChatClient(config)
+    chat_client = LLMClient()
     market = CTraderPricesClient(config)
     try:
         calls = {}
@@ -75,6 +75,7 @@ def main(argv: list[str] | None = None) -> None:
         )
     finally:
         market.close()
+        chat_client.flush()
 
     for book in ("manager", "shadow"):
         record = cycle[book]

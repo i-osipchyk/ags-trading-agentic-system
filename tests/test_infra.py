@@ -1,7 +1,8 @@
-"""Static invariants over infra/ and the deploy workflow.
+"""Static invariants over infra/ and the CI / deploy workflows.
 
-Terraform applies automatically on push to main with no plan review, so the things that must never
-silently change (destroy guards, schedules, the fixed run shape, the OIDC trust) are pinned here.
+Terraform applies from GitHub Actions after the `live` approval, so the things that must never
+silently change (destroy guards, schedules, the fixed run shape, platform pins, the OIDC deploy
+path) are pinned here.
 """
 
 import json
@@ -12,16 +13,17 @@ import pytest
 
 ROOT = Path(__file__).parent.parent
 INFRA = ROOT / "infra"
+PLATFORM_REF = "v0.1.1"
 
 
 def _tf(directory: Path) -> str:
     return "\n".join(p.read_text() for p in sorted(directory.glob("*.tf")))
 
 
-def _resource(text: str, rtype: str, name: str) -> str:
-    """The body of `resource "<rtype>" "<name>" { ... }` by brace matching."""
-    start = re.search(rf'resource\s+"{rtype}"\s+"{name}"\s*\{{', text)
-    assert start, f"missing resource {rtype}.{name}"
+def _block(text: str, header: str) -> str:
+    """The body of the first `<header> { ... }` by brace matching."""
+    start = re.search(header + r"\s*\{", text)
+    assert start, f"missing {header}"
     depth, i = 1, start.end()
     while depth:
         depth += {"{": 1, "}": -1}.get(text[i], 0)
@@ -29,70 +31,120 @@ def _resource(text: str, rtype: str, name: str) -> str:
     return text[start.end():i]
 
 
-MAIN, BOOTSTRAP = _tf(INFRA), _tf(INFRA / "bootstrap")
+def _resource(text: str, rtype: str, name: str) -> str:
+    return _block(text, rf'resource\s+"{rtype}"\s+"{name}"')
 
 
-@pytest.mark.parametrize("text,rtype,name", [
-    (MAIN, "aws_s3_bucket", "data"),
-    (MAIN, "aws_secretsmanager_secret", "main"),
-    (BOOTSTRAP, "aws_s3_bucket", "state"),
-])
-def test_irreplaceable_resources_cannot_be_destroyed(text, rtype, name):
-    assert re.search(r"prevent_destroy\s*=\s*true", _resource(text, rtype, name))
+def _module(name: str) -> str:
+    return _block(MAIN, rf'module\s+"{name}"')
 
 
-def test_data_bucket_is_versioned_and_has_no_lifecycle_expiry():
-    assert 'status = "Enabled"' in _resource(MAIN, "aws_s3_bucket_versioning", "data")
+MAIN = _tf(INFRA)
+
+
+def _function(name: str) -> str:
+    line = re.search(rf"^\s*{re.escape(name)}\s*=\s*\{{(.*)\}}\s*$", _block(_module("app"), r"functions\s*="), re.M)
+    assert line, f"missing function {name}"
+    return line.group(1)
+
+
+def test_no_bootstrap_or_hand_rolled_lambda_stack_left_in_the_project():
+    # State bucket, OIDC, deploy role and ECR are the platform bootstrap's; functions, roles,
+    # schedules and alarms are the lambda-app module's.
+    assert not (INFRA / "bootstrap").exists()
+    for rtype in ("aws_lambda_function", "aws_s3_bucket", "aws_ecr_repository", "aws_sns_topic",
+                  "aws_iam_openid_connect_provider", "aws_secretsmanager_secret"):
+        assert not re.search(rf'resource\s+"{rtype}"', MAIN), rtype
+
+
+@pytest.mark.parametrize("module,path", [("data", "data-bucket"), ("app", "lambda-app")])
+def test_platform_modules_are_pinned_to_a_release(module, path):
+    source = re.search(r'source\s*=\s*"([^"]+)"', _module(module)).group(1)
+    assert source == f"git::https://github.com/i-osipchyk/platform.git//terraform/modules/{path}?ref={PLATFORM_REF}"
+
+
+def test_data_bucket_comes_from_the_platform_module_with_no_expiry():
+    # The module is versioned + prevent_destroy; noncurrent_version_days would expire history.
+    assert "noncurrent_version_days" not in _module("data")
     assert "aws_s3_bucket_lifecycle_configuration" not in MAIN
+    assert "write_bucket_arns = [module.data.arn]" in _module("app")
 
 
-def test_region_is_never_hard_coded():
-    for text in (MAIN, BOOTSTRAP):
-        assert not re.search(r"eu-west-1", text)
-        assert not re.search(r'\bregion\s*=\s*"', text)
+def test_region_comes_only_from_the_region_variable_defaulting_to_eu_west_1():
+    variables = (INFRA / "variables.tf").read_text()
+    assert re.search(r'variable\s+"region"\s*\{[^}]*default\s*=\s*"eu-west-1"', variables)
+    assert MAIN.count("eu-west-1") == 1
+    assert re.search(r"provider\s+\"aws\"\s*\{\s*region\s*=\s*var\.region", MAIN)
 
 
-def test_state_is_remote_with_native_locking():
-    assert re.search(r"use_lockfile\s*=\s*true", MAIN)
+def test_state_is_remote_encrypted_with_native_locking_and_a_partial_config():
+    backend = _block(MAIN, r'backend\s+"s3"')
+    assert re.search(r"use_lockfile\s*=\s*true", backend) and re.search(r"encrypt\s*=\s*true", backend)
+    assert "bucket" not in backend and "key" not in backend  # passed at init: ags/<env>.tfstate
     assert "dynamodb_table" not in MAIN
 
 
-def test_bootstrap_trusts_only_the_main_branch_of_this_repo():
-    assert re.search(r'default\s*=\s*"i-osipchyk/ags-trading-agentic-system"', BOOTSTRAP)
-    assert "repo:${var.github_repo}:ref:refs/heads/main" in BOOTSTRAP
-    assert "StringLike" not in BOOTSTRAP  # exact match on the subject, no wildcards
-    assert "token.actions.githubusercontent.com" in BOOTSTRAP
+def test_default_tags_identify_the_project():
+    tags = _block(MAIN, r"default_tags")
+    assert "project    = var.project" in tags and "env        = var.env" in tags
+    assert re.search(r'variable\s+"project"\s*\{[^}]*default\s*=\s*"ags"', MAIN)
 
 
-def test_all_six_lambdas_use_the_one_arm64_image_with_their_own_handler():
-    handlers = {
-        "commodity_pipeline", "portfolio", "auditor", "digest", "token_refresh", "notify",
-    }
-    for name in handlers:
-        body = _resource(MAIN, "aws_lambda_function", name)
-        assert re.search(r'package_type\s*=\s*"Image"', body) and '"arm64"' in body
-        assert f"ags.handlers.{name}.handler" in body
-    assert len(re.findall(r'resource\s+"aws_lambda_function"', MAIN)) == 6
+def test_only_live_is_deployed():
+    assert sorted(p.name for p in (INFRA / "env").glob("*.tfvars")) == ["live.tfvars"]
+    assert re.search(r'^env\s*=\s*"live"', (INFRA / "env" / "live.tfvars").read_text(), re.M)
 
 
-def test_lambda_timeouts_match_the_architecture():
-    assert re.search(r"timeout\s*=\s*600", _resource(MAIN, "aws_lambda_function", "commodity_pipeline"))
-    assert re.search(r"timeout\s*=\s*300", _resource(MAIN, "aws_lambda_function", "portfolio"))
+@pytest.mark.parametrize("name,module_path", [
+    ("commodity-pipeline", "commodity_pipeline"), ("portfolio", "portfolio"), ("auditor", "auditor"),
+    ("digest", "digest"), ("token-refresh", "token_refresh"),
+])
+def test_each_function_runs_its_own_handler_from_the_one_image(name, module_path):
+    assert f'handler = "ags.handlers.{module_path}.handler"' in _function(name)
+
+
+def test_exactly_the_five_functions_and_no_alarm_forwarder():
+    functions = re.findall(r"^\s*([a-z-]+)\s*=\s*\{", _block(_module("app"), r"functions\s*="), re.M)
+    assert sorted(functions) == ["auditor", "commodity-pipeline", "digest", "portfolio", "token-refresh"]
+
+
+def test_lambda_timeouts_and_single_writer_concurrency_match_the_architecture():
+    assert "timeout = 600" in _function("commodity-pipeline")
+    assert "timeout = 300" in _function("portfolio")
+    assert "reserved_concurrency = 1" in _function("portfolio")  # one writer to the paper book
+    assert "reserved_concurrency" not in _function("commodity-pipeline")  # seven run in parallel
+    assert "retries" not in _block(_module("app"), r"functions\s*=")  # module default 0
 
 
 @pytest.mark.parametrize("name,cron", [
-    ("cycle", "cron(0 4,16 ? * MON-FRI *)"),
     ("digest", "cron(0 17 ? * MON-FRI *)"),
     ("auditor", "cron(0 18 ? * MON-FRI *)"),
-    ("token_refresh", None),
+    ("token-refresh", "cron(0 3 * * ? *)"),
 ])
-def test_schedules_run_in_new_york_time(name, cron):
-    body = _resource(MAIN, "aws_scheduler_schedule", name)
+def test_function_schedules_run_in_new_york_time(name, cron):
+    line = re.search(rf"^\s*{re.escape(name)}\s*=\s*\{{(.*)\}}\s*$", _block(_module("app"), r"schedules\s*="), re.M)
+    assert line, f"missing schedule {name}"
+    assert f'expression = "{cron}"' in line.group(1)
+    assert 'timezone = "America/New_York"' in line.group(1)
+
+
+def test_cycle_schedule_starts_the_state_machine_twice_each_weekday_in_new_york_time():
+    body = _resource(MAIN, "aws_scheduler_schedule", "cycle")
+    assert 'schedule_expression          = "cron(0 4,16 ? * MON-FRI *)"' in body
     assert 'schedule_expression_timezone = "America/New_York"' in body
-    if cron:
-        assert re.search(rf'schedule_expression\s*=\s*"{re.escape(cron)}"', body)
-    else:
-        assert re.search(r'schedule_expression\s*=\s*"(cron\(.* \* \* \? \*\)|rate\(1 day\))"', body)
+    assert "arn      = aws_sfn_state_machine.cycle.arn" in body
+    assert "<aws.scheduler.scheduled-time>" in body
+    # In the module's group (the deploy role manages schedules only there) and under the same switch.
+    assert "group_name                   = local.name" in body
+    assert "var.schedules_enabled" in body
+    assert "schedules_enabled = var.schedules_enabled" in _module("app")
+
+
+def test_names_follow_the_project_env_prefix_the_deploy_role_is_scoped_to():
+    assert 'name     = "${local.name}-cycle"' in _resource(MAIN, "aws_sfn_state_machine", "cycle")
+    assert 'name              = "/aws/vendedlogs/states/${local.name}-cycle"' in _resource(MAIN, "aws_cloudwatch_log_group", "cycle")
+    for role in ("sfn", "cycle_scheduler"):
+        assert re.search(r'name\s*=\s*"\$\{local\.name\}-', _resource(MAIN, "aws_iam_role", role))
 
 
 def test_cycle_state_machine_keeps_the_fixed_run_shape():
@@ -116,30 +168,48 @@ def test_cycle_state_machine_keeps_the_fixed_run_shape():
     assert portfolio["Parameters"]["results.$"] == "$.results"
 
 
-def test_breaker_parameter_and_alarms_exist():
-    assert "aws_ssm_parameter" in MAIN and "breaker_reset_at" in MAIN
-    assert "ExecutionsFailed" in MAIN and "aws_cloudwatch_metric_alarm" in MAIN
-    assert re.search(r"lifecycle\s*\{[^}]*ignore_changes\s*=\s*\[value\]", _resource(MAIN, "aws_ssm_parameter", "breaker_reset_at"))
+def test_breaker_parameter_lives_under_the_env_path_and_terraform_ignores_its_value():
+    body = _resource(MAIN, "aws_ssm_parameter", "breaker_reset_at")
+    assert 'name  = "/${var.project}/${var.env}/breaker-reset-at"' in body
+    assert 'type  = "String"' in body
+    assert re.search(r"lifecycle\s*\{[^}]*ignore_changes\s*=\s*\[value\]", body)
+    assert "AGS_BREAKER_PARAM = aws_ssm_parameter.breaker_reset_at.name" in _module("app")
 
 
-def test_secret_value_is_never_managed_by_terraform():
-    assert "aws_secretsmanager_secret_version" not in MAIN
+def test_failed_cycles_alarm_to_the_shared_platform_topic():
+    body = _resource(MAIN, "aws_cloudwatch_metric_alarm", "cycle_failed")
+    assert 'metric_name         = "ExecutionsFailed"' in body
+    assert "alarm_actions       = [module.app.alarm_topic_arn]" in body
 
 
-WORKFLOW = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+def test_secret_values_are_never_managed_by_terraform():
+    assert "SecureString" not in MAIN
+    assert "aws_secretsmanager" not in MAIN
+    assert "ssm_write         = true" in _module("app")  # token-refresh rotates them itself
 
 
-def test_deploy_runs_only_on_push_to_main():
-    assert re.search(r"on:\s*\n\s*push:\s*\n\s*branches:\s*\[main\]", WORKFLOW)
-    assert "pull_request" not in WORKFLOW
+CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+DEPLOY = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
 
 
-def test_deploy_steps_run_in_the_documented_order():
-    order = ["pytest", "docker build", "docker push", "list-executions", "terraform apply -auto-approve"]
-    positions = [WORKFLOW.index(marker) for marker in order]
-    assert positions == sorted(positions), "tests -> build -> push -> wait for no RUNNING execution -> apply"
+def test_ci_runs_the_platform_python_workflow_on_every_push():
+    assert re.search(r"on:\s*\n\s*push:", CI)
+    assert f"uses: i-osipchyk/platform/.github/workflows/python-ci.yml@{PLATFORM_REF}" in CI
+
+
+def test_deploy_runs_only_after_ci_succeeds_on_main():
+    assert re.search(r"workflow_run:\s*\n\s*workflows: \[CI\]\s*\n\s*types: \[completed\]\s*\n\s*branches: \[main\]", DEPLOY)
+    assert "github.event.workflow_run.conclusion == 'success'" in DEPLOY
+    assert "pull_request" not in DEPLOY and "push:" not in DEPLOY
+
+
+def test_deploy_uses_the_platform_workflow_for_live_and_waits_for_running_cycles():
+    assert f"uses: i-osipchyk/platform/.github/workflows/lambda-deploy.yml@{PLATFORM_REF}" in DEPLOY
+    assert "project: ags" in DEPLOY and "environment: live" in DEPLOY
+    assert "pre-apply: scripts/wait_for_cycle.sh ags-live-cycle" in DEPLOY
+    assert "list-executions" in (ROOT / "scripts" / "wait_for_cycle.sh").read_text()
 
 
 def test_deploy_authenticates_with_oidc_not_stored_keys():
-    assert "id-token: write" in WORKFLOW and "role-to-assume" in WORKFLOW
-    assert "AWS_SECRET_ACCESS_KEY" not in WORKFLOW
+    assert "id-token: write" in DEPLOY
+    assert "AWS_SECRET_ACCESS_KEY" not in DEPLOY

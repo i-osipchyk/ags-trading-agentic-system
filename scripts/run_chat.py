@@ -10,17 +10,17 @@ from pathlib import Path
 import streamlit as st
 
 from ags.config import Config
-from ags.llm.deepseek_client import DeepSeekChatClient
+from ags.llm.client import LLMClient
 from ags.ui.runs_page import render_runs_page
 from ags.ui.streamlit_app import render_chat_page
 
-_ROOT = Path(__file__).parent
+_ROOT = Path(__file__).resolve().parents[1]  # repo root
 
 
 @st.cache_resource
-def _client_and_model() -> tuple[DeepSeekChatClient, str]:
+def _client_and_model() -> tuple[LLMClient, str]:
     config = Config.from_env()
-    return DeepSeekChatClient(config), config.deepseek_model
+    return LLMClient(), config.deepseek_model
 
 
 def _runs() -> None:

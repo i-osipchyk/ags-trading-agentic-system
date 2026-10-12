@@ -89,7 +89,7 @@ Each independently testable the same way as Stage 6:
 
 ## Stage 8 — Orchestrator without coordinator
 
-`run_pipeline.py` fanning the four analysts out via `asyncio.gather`,
+`scripts/run_pipeline.py` fanning the four analysts out via `asyncio.gather`,
 writing the full JSONL log, printing raw per-analyst outputs — no
 synthesis yet.
 
@@ -103,7 +103,7 @@ rubric.
 
 **Test:** unit test against a fixture set of four canned analyst outputs
 (full-agreement, split, and mostly-neutral cases) to check rubric mapping.
-Then a live end-to-end `run_pipeline.py` run for one commodity.
+Then a live end-to-end `scripts/run_pipeline.py` run for one commodity.
 
 ## Stage 10 — Coordinator track record
 
@@ -116,7 +116,7 @@ wire into the coordinator prompt and re-run Stage 9's live check.
 
 ## Stage 11 — Auditor
 
-`run_auditor.py`, the due-checkpoint scan
+`scripts/run_auditor.py`, the due-checkpoint scan
 (`trigger_timestamp + {1,2,4,8}w <= now`, diffed against what's already
 graded), `audits/{run_id}/{weeks}w.json` writer.
 
@@ -126,7 +126,7 @@ fixture `run_id` to exercise a live grading pass.
 
 ## Stage 12 — Chat interface
 
-Streamlit app (`run_chat.py`), scoped to one frozen `run_id`, zero tool access.
+Streamlit app (`scripts/run_chat.py`), scoped to one frozen `run_id`, zero tool access.
 
 **Test:** manual browser check asking a question about a completed run;
 confirm via logs that no live tool calls fired during the chat session.
@@ -198,7 +198,7 @@ day). Daily bars: completed bars only.
 **Test:** extend the PIT fixture suite — same-day release before vs. after
 `as_of`; a date-only release at its configured time; a 04:00 ET `as_of`
 never sees that day's partial daily bar. All existing tests updated and
-green. One live `run_pipeline.py` run to confirm nothing regressed.
+green. One live `scripts/run_pipeline.py` run to confirm nothing regressed.
 
 ## Stage 17 — Storage seam (`storage/`, local only)
 
@@ -298,14 +298,14 @@ books' last cycle files, fetch market data, replay, mark, run manager and
 shadow through guardrails, fill, write `portfolio/{book}/cycles/{cycle_id}.json`
 and `portfolio/logs/{cycle_id}.jsonl`. `off_schedule=True` logs everything
 but writes no cycle file. Breaker reset read from an injected source (SSM in
-Lambda, a local file in tests). `run_cycle.py`: seven pipelines + portfolio
+Lambda, a local file in tests). `scripts/run_cycle.py`: seven pipelines + portfolio
 stage locally, into `local/`. `portfolio/metrics.py`: equity curves,
 manager-vs-shadow P&L.
 
 **Test:** stage-level unit test with stub model, stub prices, and
 `LocalStorage` — two consecutive cycles, one with a failed commodity (held),
 one with a stop-out in the replay window; off-schedule writes nothing to the
-books. Then one live `run_cycle.py` into `local/` and a read-through of the
+books. Then one live `scripts/run_cycle.py` into `local/` and a read-through of the
 cycle files.
 
 ## Stage 26 — Auditor additions
@@ -323,8 +323,11 @@ effective-count weights on a fixture of ten overlapping calls.
 ## Stage 27 — Lambda handlers + container image
 
 `handlers/` — `commodity_pipeline`, `portfolio`, `auditor`, `digest`,
-`token_refresh`, `notify` — thin wrappers that build `Config` from Secrets
-Manager and `S3Storage` from env, then call existing functions.
+`token_refresh` — thin wrappers that build `Config` from the environment
+(`config.load_env()`: SSM `/ags/<env>/*` on Lambda) and `S3Storage` from
+env, then call existing functions. Every LLM call goes through llmkit with
+the agent as `component` (`llm/client.py`); handlers flush it after each
+invocation.
 `crochet.setup()` once at import. Late-start (>1 h) abort. Move Streamlit to
 a `ui` dependency group (`default-groups` keeps local unchanged).
 `Dockerfile` on the AWS Lambda Python base image, arm64.
@@ -337,7 +340,7 @@ against `moto`/`LocalStorage`.
 ## Stage 28 — cTrader token refresh
 
 `token_refresh` handler: refresh when within 7 days of expiry, write tokens
-back to Secrets Manager; clients re-read the secret once on an auth error.
+back to their SSM parameters; clients re-read SSM once on an auth error.
 
 **Test:** unit tests with a fake token endpoint and fake secret store
 (refresh, no-op, failure → alert). Manual check against the real endpoint
@@ -345,32 +348,42 @@ once deployed.
 
 ## Stage 29 — Telegram alerts + digest (`notify/`)
 
-Telegram client, alert functions (cycle failed, commodity failed twice in a
-row, breaker tripped, token refresh failed, Lambda errors via CloudWatch),
-and the 17:00 digest: spend (LLM by agent/commodity, 24 h + MTD; AWS from
-Cost Explorer, prior day), book, manager vs shadow, latest calls.
+Telegram client, alert functions (commodity failed twice in a row, breaker
+tripped, token refresh failed; cycle failed and Lambda errors arrive through
+the shared `platform-alarms` topic), and the 17:00 digest: spend (LLM by
+agent/commodity from llmkit's per-call cost in the run logs, 24 h + MTD; AWS
+from Cost Explorer, prior day), book, manager vs shadow, latest calls.
 
 **Test:** unit tests render the digest from fixture cycle files and run
 logs (golden-text comparison); fake HTTP for Telegram; consecutive-failure
 detection across fixture cycles. One real message to the chat.
 
-## Stage 30 — Terraform + CI
+## Stage 30 — Terraform + CI (on the platform)
 
-- `infra/bootstrap/`: state bucket, GitHub OIDC provider, deploy role. You
-  apply it once by hand.
-- `infra/`: data bucket (versioning, `prevent_destroy`), ECR, the six
-  Lambdas, Step Functions (Map ×7 with retry/catch → portfolio), EventBridge
-  schedules (cycle `cron(0 4,16 ? * MON-FRI *)`, digest 17:00, auditor
-  18:00, token refresh daily — all `America/New_York`), Secrets Manager
-  secret (`prevent_destroy`, value set by hand), SSM breaker parameter,
-  CloudWatch alarms → `notify`, IAM. Region from `AWS_REGION`.
-- `.github/workflows/deploy.yml` on push to `main`: unit tests → build/push
-  image (SHA tag) → wait for no `RUNNING` executions → `terraform apply
-  -auto-approve`.
+Built on `~/dev/platform` (`platform/docs/adoption.md` § ags). The state
+bucket, GitHub OIDC, the `gh-deploy-ags` role, the `ags` ECR repo and the
+`platform-alarms` topic come from the platform **bootstrap** — not from this
+repo.
 
-**Test:** `terraform validate` + `terraform plan` locally; first push
-deploys green; a manual off-schedule execution completes end to end and
-writes no book cycle files; a planned destroy of the data bucket fails on
+- `infra/`: the platform `data-bucket` and `lambda-app` modules (pinned to a
+  platform tag) for the bucket, the five Lambdas, their role, log groups,
+  schedules (digest 17:00, auditor 18:00, token refresh daily — all
+  `America/New_York`) and Errors alarms; next to them, Step Functions
+  `ags-<env>-cycle` (Map ×7 with retry/catch → portfolio) with its log group,
+  the cycle schedule `cron(0 4,16 ? * MON-FRI *)` and its own scheduler role,
+  the SSM breaker parameter and the cycle-failed alarm. Region from
+  `AWS_REGION`, defaulting to eu-west-1. One env: `live`.
+- Secrets: SSM SecureStrings at `/ags/live/*`, pushed by
+  `scripts/put_secrets.py`; never in Terraform.
+- `.github/workflows/ci.yml` → platform `python-ci.yml`;
+  `.github/workflows/deploy.yml` → platform `lambda-deploy.yml` for `live`
+  after CI on `main`, with the `live` Environment's required reviewer, and
+  `scripts/wait_for_cycle.sh` as `pre-apply` (no `RUNNING` executions).
+
+**Test:** `tests/test_infra.py` pins the invariants; `terraform validate`
+locally; the first deploy's plan (job summary) creates only `ags-live-*`
+resources; a manual off-schedule execution completes end to end and writes
+no book cycle files; a planned destroy of the data bucket fails on
 `prevent_destroy` (checked with a throwaway plan, not applied).
 
 ## Stage 31 — Data migration + local mirror

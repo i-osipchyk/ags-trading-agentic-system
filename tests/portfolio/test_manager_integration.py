@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 
 from ags.config import Config
-from ags.llm.deepseek_client import DeepSeekChatClient
+from ags.llm.client import LLMClient
 from ags.portfolio.guardrails import GuardrailConfig, apply_guardrails
 from ags.portfolio.manager import run_portfolio_manager
 from ags.tools.pit_store import ET
@@ -15,7 +15,7 @@ def test_live_manager_answers_canned_inputs_with_a_schema_valid_proposal():
     config = Config.from_env()
 
     result = run_portfolio_manager(
-        DeepSeekChatClient(config), as_of=AS_OF, model=config.deepseek_model,
+        LLMClient().bind("manager", test="integration"), as_of=AS_OF, model=config.deepseek_model,
         calls=CALLS, lots=LOTS, risk=RISK, equity=10_000.0, free_margin=8_500.0,
     )
 

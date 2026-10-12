@@ -9,11 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ags.config import Config
-from ags.llm.deepseek_client import DeepSeekChatClient
+from ags.llm.client import LLMClient
 from ags.pipeline import run_pipeline
 from ags.ui.format import to_markdown
 
-_ROOT = Path(__file__).parent
+_ROOT = Path(__file__).resolve().parents[1]  # repo root
 
 
 def _aware_datetime(value: str) -> datetime:
@@ -34,16 +34,18 @@ def main(argv: list[str] | None = None) -> None:
     config = Config.from_env()
     now = datetime.now(timezone.utc)
 
+    chat_client = LLMClient()
     result = run_pipeline(
         commodity=args.commodity,
         as_of=args.as_of or now,
         trigger_timestamp=now,
-        chat_client=DeepSeekChatClient(config),
+        chat_client=chat_client,
         model=config.deepseek_model,
         log_dir=_ROOT / "logs",
         audit_dir=_ROOT / "audits",
         data_dir=_ROOT / "data",
     )
+    chat_client.flush()
 
     print(f"run_id: {result['run_id']}")
     print("\n== call ==")

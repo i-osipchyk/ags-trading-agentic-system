@@ -8,15 +8,25 @@ terraform {
     }
   }
 
-  # Bucket and region come from `terraform init -backend-config=...` (backend blocks cannot use
-  # variables, and the region must not be hard-coded). S3-native locking: no DynamoDB table.
+  # Partial config: bucket/key/region come from `terraform init -backend-config=...`
+  # (CI: platform lambda-deploy workflow, state key ags/<env>.tfstate; locally: README).
   backend "s3" {
-    key          = "ags/terraform.tfstate"
     use_lockfile = true
+    encrypt      = true
   }
 }
 
-# Region is read from AWS_REGION by the provider itself.
-provider "aws" {}
+provider "aws" {
+  region = var.region
+
+  default_tags {
+    tags = {
+      project    = var.project
+      env        = var.env
+      managed_by = "terraform"
+      repo       = "i-osipchyk/ags-trading-agentic-system"
+    }
+  }
+}
 
 data "aws_caller_identity" "current" {}

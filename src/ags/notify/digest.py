@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 
-from ags.notify.spend import LlmPrices, llm_spend
+from ags.notify.spend import llm_spend
 from ags.storage import Storage
 from ags.tools.sources.prices import CTRADER_SYMBOL_NAMES
 
@@ -29,10 +29,12 @@ def _book_line(label: str, record: dict) -> str:
             f" · {_positions(record['closing_lots'])}")
 
 
-def _spend_section(storage: Storage, now: datetime, prices: LlmPrices, aws_cost) -> list[str]:
-    spend = llm_spend(storage, now=now, prices=prices)
+def _spend_section(storage: Storage, now: datetime, aws_cost) -> list[str]:
+    spend = llm_spend(storage, now=now)
     day = spend["24h"]
     lines = ["<b>Spend</b>", f"LLM 24h: {_money(day['total'])} · MTD: {_money(spend['mtd']['total'])}"]
+    if spend["mtd"]["unpriced"]:
+        lines.append(f"Unpriced LLM calls (MTD, model missing from llmkit's price table): {spend['mtd']['unpriced']}")
     if day["by_agent"]:
         lines += [f"By agent (24h): {_ranked(day['by_agent'])}", f"By commodity (24h): {_ranked(day['by_commodity'])}"]
     try:
@@ -66,10 +68,10 @@ def _calls_section(storage: Storage) -> list[str]:
     return lines
 
 
-def compose_digest(storage: Storage, *, now: datetime, prices: LlmPrices, aws_cost) -> str:
+def compose_digest(storage: Storage, *, now: datetime, aws_cost) -> str:
     sections = [
         [f"<b>AGS digest · {now.date().isoformat()}</b>"],
-        _spend_section(storage, now, prices, aws_cost),
+        _spend_section(storage, now, aws_cost),
         _book_section(storage),
         _calls_section(storage),
     ]

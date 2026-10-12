@@ -115,12 +115,33 @@ still makes a single **1-week-horizon** call; consecutive calls overlap, so
 scorecards must weight them (see `DESIGN.md`) rather than count every call
 as an independent sample.
 
+## Platform (`~/dev/platform`)
+
+This project follows the platform conventions (`../CLAUDE.md`, `../platform/docs/`); only the
+ags-specific parts are here.
+
+- **LLM:** every model call goes through llmkit from `src/ags/llm/client.py`, the only module
+  that imports `llmkit`/`openai`. Bind the client to the agent name as the `component`
+  (`bind(client, "<agent>", commodity=..., run_id=...)`); the root `LLMClient` refuses to
+  complete unbound. Run logs remain the audit trail; llmkit adds usage and cost
+  (`usage.cost_usd` in the run log comes from it — don't add a second price table).
+- **Secrets:** SSM SecureStrings at `/ags/<env>/<kebab-name>`, pushed with
+  `uv run python scripts/put_secrets.py --env live` (`--include-tokens` to re-seed the cTrader
+  tokens, which `token-refresh` rotates itself). `config.load_env()` loads them; never put
+  values in Terraform.
+- **One env, `live`** — a deliberate deviation from the platform's default `demo,live`: this is
+  a paper forward test with no real money to stage for, and a second deployed env would be a
+  second official record and double the LLM spend. AWS names are `ags-live-<name>`.
+
 ## Deployment
 
-Terraform in `infra/`, region from `AWS_REGION` (`eu-west-1`). Every push to
-`main` runs unit tests and then `terraform apply` automatically — there is
-no plan review, so destructive changes to the data bucket, state bucket,
-and secrets are blocked by `prevent_destroy`. Don't remove those guards.
+Terraform in `infra/` on the platform `lambda-app` / `data-bucket` modules (pinned to a platform
+tag), plus Step Functions and the cycle schedule in `infra/cycle.tf`. Region from `AWS_REGION`,
+default `eu-west-1`. Every push runs CI (platform `python-ci.yml`); after CI passes on `main`,
+Deploy (platform `lambda-deploy.yml`) builds the image, plans, waits for the required reviewer
+on the `live` GitHub Environment and for no running cycle, then applies. Never run
+`terraform apply` locally. The data bucket keeps `prevent_destroy` (from the platform module) —
+don't remove that guard. `tests/test_infra.py` pins the infra invariants.
 
 ## Backtest leakage — read before touching historical runs
 

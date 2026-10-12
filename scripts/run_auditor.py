@@ -10,9 +10,9 @@ from pathlib import Path
 
 from ags.agents.auditor import CHECKPOINT_WEEKS, run_auditor
 from ags.config import Config
-from ags.llm.deepseek_client import DeepSeekChatClient
+from ags.llm.client import LLMClient, flush
 
-_ROOT = Path(__file__).parent
+_ROOT = Path(__file__).resolve().parents[1]  # repo root
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -24,8 +24,9 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--run-id and --weeks must be given together")
 
     config = Config.from_env()
+    chat_client = LLMClient()
     result = run_auditor(
-        DeepSeekChatClient(config),
+        chat_client,
         log_dir=_ROOT / "logs",
         audit_dir=_ROOT / "audits",
         data_dir=_ROOT / "data",
@@ -33,6 +34,7 @@ def main(argv: list[str] | None = None) -> None:
         now=datetime.now(timezone.utc),
         only=(args.run_id, args.weeks) if args.run_id else None,
     )
+    flush(chat_client)
 
     for run_id, weeks in result["graded"]:
         print(f"graded {run_id} {weeks}w")

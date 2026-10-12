@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from ags.llm.client import bind
 from ags.llm.loop import ChatClient
 from ags.logging.run_log import RunLog
 
@@ -38,4 +39,4 @@ def answer_question(
         ),
         {"role": "user", "content": question},
     ]
-    return chat_client.complete(messages, None, model=model)["content"]
+    return bind(chat_client, "run_chat", run_id=run_id).complete(messages, None, model=model)["content"]

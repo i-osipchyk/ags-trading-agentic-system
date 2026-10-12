@@ -16,7 +16,8 @@ class FakeSecretStore:
         return dict(self.values)
 
     def write(self, values):
-        self.values = dict(values)
+        # Like SSM: only the keys written change.
+        self.values.update(values)
         self.writes += 1
 
 

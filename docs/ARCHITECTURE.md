@@ -61,14 +61,19 @@ src/ags/
   notify/            # Telegram client, alerts, daily digest (v3)
   handlers/          # Lambda entry points — thin wrappers, no logic (v3)
   ui/                # Streamlit app: runs grid + job control (runs, jobs, runs_page), chat (chat, streamlit_app)
-run_pipeline.py       # CLI: one commodity run (local, unofficial namespace)
-run_cycle.py          # CLI: full cycle locally — 7 pipelines + portfolio stage (v3, unofficial)
-run_auditor.py         # CLI: trigger due checkpoint evaluations (all, or one via --run-id/--weeks)
-scripts/sync_local.sh  # pull-only S3 → local mirror (v3)
-infra/                 # Terraform (v3)
-  bootstrap/           # one-time, applied by hand: state bucket + GitHub OIDC deploy role
-Dockerfile             # Lambda container image (v3)
-.github/workflows/     # deploy on push to main (v3)
+scripts/                 # every CLI and helper script
+  run_pipeline.py        # one commodity run (local, unofficial namespace)
+  run_cycle.py           # full cycle locally — 7 pipelines + portfolio stage (v3, unofficial)
+  run_auditor.py         # trigger due checkpoint evaluations (all, or one via --run-id/--weeks)
+  run_chat.py            # Streamlit app: runs grid + chat over frozen runs
+  sync_local.sh          # pull-only S3 → local mirror (v3)
+  put_secrets.py         # .env → SSM /ags/<env>/* (v3)
+  wait_for_cycle.sh      # deploy pre-apply: wait for no RUNNING cycle (v3)
+  migrate_to_s3.py       # one-off: seed the bucket from a pre-v3 checkout (v3)
+infra/                   # Terraform (v3): platform lambda-app + data-bucket modules, Step Functions
+  env/live.tfvars        # the one environment
+Dockerfile               # Lambda container image (v3)
+.github/workflows/       # CI on every push; deploy to live after CI on main (v3, platform workflows)
 tests/
   tools/               # PIT fixture-based unit tests
 data/                   # PIT store contents (gitignored; mirror of S3 in v3)
@@ -94,6 +99,19 @@ call (its tool allowlist) — never the tool implementation itself, so the
   `base_url`/model-string change, not a redesign.
 - The 5-tool-call cap, `degraded` flagging, and full prompt/tool-call/result
   logging are guardrails owned by this loop, not delegated to a framework.
+- **Every model call goes through llmkit** (the `~/dev` platform's tracked
+  client, `platform/docs/llm-observability.md`), from one module:
+  `llm/client.py`. The root `LLMClient` has no `complete`; it must be
+  `bind()`-ed to a **component** first — the agent name (`technical`, `news`,
+  `weather`, `supply_demand`, `coordinator`, `manager`, `auditor`,
+  `run_chat`), with `commodity` / `run_id` / `cycle_id` as metadata. The
+  binding happens where the agent name is already known (`LoggingChatClient`,
+  the auditor, the run chat), so `run_loop` and the agents are unchanged.
+  Each pipeline run, portfolio stage and audit checkpoint is one llmkit
+  trace. llmkit prices every call from the platform price table and sends it
+  to its sinks (JSONL locally, stdout → CloudWatch on Lambda, Langfuse when
+  keyed); the price also goes into the run log's `usage.cost_usd`. Run logs
+  stay the full audit trail; llmkit adds only usage and cost tracking.
 
 ### Tool-call-cap enforcement
 
@@ -201,12 +219,12 @@ the grid — a known gap until the UI is revisited. The "off-cadence" flag
 still says "not Friday," which is now meaningless; also left for the UI
 revisit.
 
-- **Pipeline trigger:** synchronous CLI, `python run_pipeline.py --commodity corn`.
+- **Pipeline trigger:** synchronous CLI, `uv run python scripts/run_pipeline.py --commodity corn`.
   Generates `run_id`, `asyncio.gather`s the four analysts, passes results to
   the coordinator, writes the JSONL log, prints the final call. No web
   server, no queue, no background worker — a CLI is trivially replaced by a
   scheduled job later without redesign.
-- **Chat interface:** a local Streamlit app (`uv run streamlit run run_chat.py`,
+- **Chat interface:** a local Streamlit app (`uv run streamlit run scripts/run_chat.py`,
   bound to `127.0.0.1` via `.streamlit/config.toml`) — not FastAPI/Jinja, not a
   JS framework/SPA. Scoped to a single frozen `run_id` chosen in the sidebar
   (newest first; the conversation resets when the run changes); reads only
@@ -221,7 +239,7 @@ revisit.
   yellow = not yet due, red = due and ungraded, green = graded (✓/✗/– for
   `direction_correct`), grey = run has no call. Clicking a run opens the chat
   page. The page can also trigger work, but the **CLI remains the trigger**:
-  buttons spawn `run_pipeline.py` / `run_auditor.py` as detached subprocesses
+  buttons spawn `scripts/run_pipeline.py` / `scripts/run_auditor.py` as detached subprocesses
   (no queue, no worker). Exactly one job runs at a time, tracked in
   `jobs/current.json` (pid, label, start time; a dead pid is a stale lock) with
   output in `jobs/output.log` and the exit code in `jobs/exit_code`; "run all"
@@ -234,7 +252,7 @@ revisit.
 
 ## Auditor
 
-- **Trigger:** manual CLI, `python run_auditor.py`, no arguments. Scans all
+- **Trigger:** manual CLI, `uv run python scripts/run_auditor.py`, no arguments. Scans all
   logged runs, computes which `(run_id, checkpoint_weeks)` pairs are due
   (`trigger_timestamp + {1,2,4,8} weeks <= now`) by diffing against what's
   already graded, and runs a separate evaluator invocation per outstanding
@@ -333,12 +351,18 @@ to matter.
 - `.env.example` checked in with no real values.
 - Fails fast at startup if a required key is missing, rather than failing
   mid-run partway through the four analysts.
-- **v3, in Lambda:** the same `Config`, populated from one Secrets Manager
-  secret (JSON of the same keys) instead of `.env`, loaded once per
-  container. New keys: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
-  `CTRADER_REFRESH_TOKEN`. Non-secret settings (guardrail limits, risk
-  budget, starting equity, stop-out level, per-source release times, storage
-  bucket) are plain env vars set by Terraform.
+- **v3, in Lambda:** the same `Config`, built from `os.environ` after
+  `config.load_env()` copies the SSM SecureStrings under `/ags/<env>/` (and
+  the shared `/platform/shared/` Langfuse keys) into the environment,
+  kebab-case → UPPER_SNAKE (`/ags/live/deepseek-api-key` →
+  `DEEPSEEK_API_KEY`; platform conventions § Secrets). Loaded at cold start
+  and re-read on every invocation, so a token rotated by `token_refresh` is
+  picked up by warm containers. Values are pushed by
+  `scripts/put_secrets.py` from `.env`, never by Terraform. New keys:
+  `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CTRADER_REFRESH_TOKEN`.
+  Non-secret settings (guardrail limits, risk budget, starting equity,
+  stop-out level, per-source release times, storage bucket) are plain env
+  vars set by Terraform.
 - **Guardrail and book parameters** are config, never literals in code:
   `PER_COMMODITY_CAP=1.0`, `GRAIN_BUCKET_CAP=1.5`, `GROSS_LEVERAGE_CAP=3.0`,
   `MARGIN_BUFFER=0.40`, `MIN_RESIZE_FRACTION=0.20`, `DRAWDOWN_BREAKER=0.80`,
@@ -347,22 +371,25 @@ to matter.
 
 ## Scheduled cycles on AWS (v3)
 
-Region `eu-west-1`, from `AWS_REGION` — never hard-coded in Terraform or
-code. Schedules are in `America/New_York` regardless of region.
+Region from `AWS_REGION`, defaulting to `eu-west-1` (platform conventions
+§ Region) — never hard-coded anywhere else. Schedules are in
+`America/New_York` regardless of region. One environment, `live` (a paper
+forward test: there is no real money to stage for, and a second deployed env
+would be a second official record). Names are `ags-live-<name>`.
 
 ```
 EventBridge Scheduler  cron(0 4,16 ? * MON-FRI *)  tz America/New_York
-  └─ Step Functions "cycle"  (input: cycle_id, scheduled_time, off_schedule)
-       ├─ Map ×7 (parallel) → Lambda commodity_pipeline(commodity)
+  └─ Step Functions "ags-live-cycle"  (input: cycle_id, scheduled_time, off_schedule)
+       ├─ Map ×7 (parallel) → Lambda commodity-pipeline(commodity)
        │     retry 2× with backoff; Catch → {commodity, failed: true}
        └─ Lambda portfolio(cycle_id, commodity results)
 Scheduler (weekdays 17:00 ET) → Lambda digest
 Scheduler (weekdays 18:00 ET) → Lambda auditor
-Scheduler (daily)             → Lambda token_refresh
-CloudWatch alarms (execution failed, Lambda errors) → Lambda notify → Telegram
+Scheduler (daily)             → Lambda token-refresh
+CloudWatch alarms (execution failed, Lambda errors) → SNS platform-alarms → Telegram
 ```
 
-- **One container image** (ECR, arm64), all six Lambdas, different handler
+- **One container image** (ECR repo `ags`, arm64, pinned by digest), all five Lambdas, different handler
   per function. Built from the same `src/ags` package with the UI dependency
   group excluded (Streamlit moves to a `ui` dependency group; uv's
   `default-groups` keeps local `uv sync` unchanged). Zip packaging was
@@ -397,7 +424,9 @@ CloudWatch alarms (execution failed, Lambda errors) → Lambda notify → Telegr
   (`If-None-Match: *`), so seven parallel Lambdas writing the same PIT
   release can't overwrite each other — the loser gets a no-op, matching
   `write_pit`'s existing "refuse to overwrite" semantics.
-- **Bucket:** versioning on, `prevent_destroy`, no lifecycle expiry. Keys:
+- **Bucket:** `ags-live-data-<account>`, from the platform `data-bucket`
+  module: versioning on, encrypted, private, `prevent_destroy`, no lifecycle
+  expiry; the function role has no `DeleteObject`. Keys:
   `data/…`, `logs/…`, `audits/…`, `portfolio/…`, `archive/pre-v3/…`.
 - **Local mirror:** `scripts/sync_local.sh` = `aws s3 sync` **down only**
   into `data/`, `logs/`, `audits/`, `portfolio/`. Nothing syncs up. Local CLI
@@ -431,8 +460,9 @@ CloudWatch alarms (execution failed, Lambda errors) → Lambda notify → Telegr
   bid/ask quote snapshot at fill time, H1 trendbars between cycles, daily
   bars for ATR. Specs are refetched daily and stored PIT, since swap rates
   change.
-- **Drawdown-breaker reset:** an SSM parameter `breaker_reset_at`, set by
-  hand (`aws ssm put-parameter`). The portfolio Lambda reads it and records
+- **Drawdown-breaker reset:** an SSM parameter `/ags/<env>/breaker-reset-at`
+  (a plain String, created by Terraform with value `none`), set by hand
+  (`aws ssm put-parameter --overwrite`). The portfolio Lambda reads it and records
   the reset in the next cycle file — so the reset is logged and the book
   still has exactly one writer.
 - **No-live-execution test:** `tests/test_no_live_execution.py` greps
@@ -458,44 +488,57 @@ CloudWatch alarms (execution failed, Lambda errors) → Lambda notify → Telegr
 
 Unattended runs need it: cTrader Open API access tokens expire (~30 days).
 `token_refresh` runs daily, refreshes when the token is within 7 days of
-expiry, and writes the new access + refresh tokens back to the Secrets
-Manager secret. Failure alerts on Telegram. Lambdas read the secret per cold
-start, and once more on an auth error.
+expiry, and writes the new refresh token, access token and expiry back to
+their SSM parameters under `/ags/<env>/` (the function role has
+`PutParameter` there, platform `ssm_write`). Failure alerts on Telegram.
+Lambdas re-read SSM per invocation, and once more on an auth error.
 
 ## Notifications (v3)
 
 - One Telegram bot, one chat; `notify/telegram.py` is a thin `sendMessage`
   wrapper (HTML parse mode, long messages split).
-- **Alerts:** a `notify` Lambda subscribed to CloudWatch alarms (Step
-  Functions execution failed, Lambda errors), plus direct calls from the
-  portfolio Lambda (commodity failed two cycles running, breaker tripped)
-  and `token_refresh` (refresh failed).
+- **Alerts:** CloudWatch alarms (Step Functions execution failed, Lambda
+  errors) go to the shared `platform-alarms` SNS topic, whose notifier posts
+  to Telegram — there is no ags-specific alarm forwarder. Direct alerts come
+  from the portfolio Lambda (commodity failed two cycles running, breaker
+  tripped) and `token_refresh` (refresh failed).
 - **Digest:** the `digest` Lambda reads the last 24 h of cycle files and run
-  logs from S3. LLM spend is summed from the per-call cost the LLM layer
-  already records in run logs (by agent, by commodity, 24 h and
-  month-to-date); AWS spend comes from Cost Explorer, labeled as the prior
-  day. Content: spend, book, manager vs shadow, latest calls.
+  logs from S3. LLM spend is summed from the per-call `usage.cost_usd` that
+  llmkit priced and the LLM layer records in run logs (by agent, by
+  commodity, 24 h and month-to-date) — no second price table. Calls whose
+  model llmkit has no price for are counted as unpriced, never guessed. AWS
+  spend comes from Cost Explorer, labeled as the prior day. Content: spend, book, manager vs shadow, latest calls.
 
 ## Infrastructure as code and deployment (v3)
 
-- **Terraform**, in `infra/`. State in an S3 bucket with S3-native locking
-  (`use_lockfile = true`, no DynamoDB). The AWS provider takes its region
-  from `AWS_REGION`.
-- **Bootstrap** (`infra/bootstrap/`, applied once by hand, local state): the
-  state bucket and the GitHub OIDC provider + deploy role, trust-scoped to
-  `repo:i-osipchyk/ags-trading-agentic-system:ref:refs/heads/main`. No
-  long-lived AWS keys in GitHub.
-- **Main stack:** data bucket, ECR repo, Lambdas, Step Functions state
-  machine, EventBridge schedules, Secrets Manager secret (value set by hand,
-  not in Terraform state), SSM breaker parameter, CloudWatch alarms, IAM.
-  `prevent_destroy` on the data bucket, the state bucket, and the secret.
-- **Deploy on push to `main`** (GitHub Actions, single prod environment, no
-  plan review):
-  1. `uv sync` + `pytest` (unit only — the existing `addopts = "-m 'not
-     integration'"` already excludes integration tests, which hit real
-     services and cost money).
-  2. Build and push the image, tagged with the commit SHA.
-  3. Wait until no Step Functions execution is `RUNNING` (poll, 15-min cap),
-     so no cycle straddles two image versions.
-  4. `terraform apply -auto-approve` with the new image tag.
+Built on the `~/dev` platform (`platform/docs/deployment.md`); the shared
+pieces are not repeated here.
+
+- **Platform bootstrap** (applied once by hand from `~/dev/platform`) owns
+  the state bucket `tfstate-<account>-<region>`, the GitHub OIDC provider,
+  the `gh-deploy-ags` role (trusted only from this repo's `live` GitHub
+  Environment, scoped to `ags-*` resources), the `ags` ECR repository, the
+  `platform-alarms` topic + Telegram notifier, and the project's budget.
+- **`infra/`** (state key `ags/live.tfstate`, S3-native locking): the
+  `data-bucket` and `lambda-app` modules, pinned to a platform tag, plus the
+  project-specific Step Functions state machine, its log group, the cycle
+  schedule and its role, the SSM breaker parameter and the cycle-failed
+  alarm (`cycle.tf`). The module creates the function role, log groups,
+  functions, async retry config (0), the other schedules and an Errors alarm
+  per function. Secret values never pass through Terraform.
+- **Deploy** (GitHub Actions, platform reusable workflows):
+  1. CI on every push: `uv sync --frozen` + `pytest` (unit only — the
+     `addopts = "-m 'not integration'"` excludes integration tests, which
+     hit real services and cost money).
+  2. After CI succeeds on `main`, Deploy runs `lambda-deploy.yml` for `live`,
+     which waits for the required reviewer on the `live` GitHub Environment.
+  3. Build and push the image (tag = first 12 chars of the commit SHA),
+     resolve it to a digest.
+  4. `terraform plan` (shown in the job summary), then the `pre-apply` step
+     `scripts/wait_for_cycle.sh ags-live-cycle` waits until no execution is
+     `RUNNING` (15-min cap), so no cycle straddles two image versions.
+  5. `terraform apply` of that plan.
+- Schedules start disabled (`schedules_enabled = false` in
+  `infra/env/live.tfvars`). Start one cycle by hand, check it, then flip the
+  flag in a PR.
 - Local CLI runs are the only sandbox; there is no dev/staging stack.

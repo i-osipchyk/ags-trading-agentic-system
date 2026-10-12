@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: i-osipchyk/platform/.github/workflows/python-ci.yml@v0.1.1
+    with:
+      ruff: false # no ruff config yet (platform docs/adoption.md)
+      mypy: false

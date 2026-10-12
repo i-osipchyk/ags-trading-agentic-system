@@ -5,7 +5,7 @@ import pytest
 from ags.tools.pit_store import ET
 from ags.agents.technical import run_technical_analyst
 from ags.config import Config
-from ags.llm.deepseek_client import DeepSeekChatClient
+from ags.llm.client import LLMClient
 
 
 def _last_weekday(day: date) -> date:
@@ -17,7 +17,7 @@ def _last_weekday(day: date) -> date:
 @pytest.mark.integration
 def test_run_technical_analyst_standalone_run_for_corn_against_real_sources(tmp_path):
     config = Config.from_env()
-    chat_client = DeepSeekChatClient(config)
+    chat_client = LLMClient().bind("technical", test="integration")
     as_of = datetime.combine(_last_weekday(date.today() - timedelta(days=1)), time(16, 0), tzinfo=ET)
 
     result = run_technical_analyst(
