@@ -108,12 +108,16 @@ def test_exactly_the_five_functions_and_no_alarm_forwarder():
     assert sorted(functions) == ["auditor", "commodity-pipeline", "digest", "portfolio", "token-refresh"]
 
 
-def test_lambda_timeouts_and_single_writer_concurrency_match_the_architecture():
+def test_lambda_timeouts_match_the_architecture():
     assert "timeout = 600" in _function("commodity-pipeline")
     assert "timeout = 300" in _function("portfolio")
-    assert "reserved_concurrency = 1" in _function("portfolio")  # one writer to the paper book
-    assert "reserved_concurrency" not in _function("commodity-pipeline")  # seven run in parallel
     assert "retries" not in _block(_module("app"), r"functions\s*=")  # module default 0
+
+
+def test_no_reserved_concurrency_while_the_account_limit_is_10():
+    # AWS keeps 10 unreserved, so at the default account limit of 10 any reservation fails the
+    # deploy. Raise the quota first (platform docs/deployment.md § Troubleshooting).
+    assert "reserved_concurrency" not in _block(_module("app"), r"functions\s*=")
 
 
 @pytest.mark.parametrize("name,cron", [

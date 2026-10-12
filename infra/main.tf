@@ -21,13 +21,17 @@ module "app" {
 
   # retries stay 0 (module default): the cycle Lambdas are invoked synchronously by the state
   # machine, which owns retries; the rest are idempotent scans that the next run catches up on.
+  #
+  # No reserved_concurrency: the account's Lambda concurrency limit is 10, and AWS keeps 10
+  # unreserved, so any reservation fails (platform docs/deployment.md § Troubleshooting). The
+  # paper book still has one writer: portfolio runs only as the last step of a cycle execution,
+  # cycles are 12 h apart, and the deploy waits for running executions.
   functions = {
     commodity-pipeline = { handler = "ags.handlers.commodity_pipeline.handler", timeout = 600, memory = 2048 }
-    # One writer to the paper book: never two portfolio stages at once.
-    portfolio     = { handler = "ags.handlers.portfolio.handler", timeout = 300, memory = 1024, reserved_concurrency = 1 }
-    auditor       = { handler = "ags.handlers.auditor.handler", timeout = 900, memory = 1024, reserved_concurrency = 1 }
-    digest        = { handler = "ags.handlers.digest.handler", timeout = 120, memory = 512 }
-    token-refresh = { handler = "ags.handlers.token_refresh.handler", timeout = 60, memory = 256, reserved_concurrency = 1 }
+    portfolio          = { handler = "ags.handlers.portfolio.handler", timeout = 300, memory = 1024 }
+    auditor            = { handler = "ags.handlers.auditor.handler", timeout = 900, memory = 1024 }
+    digest             = { handler = "ags.handlers.digest.handler", timeout = 120, memory = 512 }
+    token-refresh      = { handler = "ags.handlers.token_refresh.handler", timeout = 60, memory = 256 }
   }
 
   # America/New_York regardless of the deployment region. The twice-daily cycle starts the state
