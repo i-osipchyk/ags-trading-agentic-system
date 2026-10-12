@@ -83,9 +83,11 @@ def cycle_id(when):
     return "cycle_" + when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
 
 
-def run(storage, market, when, call_map, manager, *, off_schedule=False, reset=None):
+def run(storage, market, when, call_map, manager, *, off_schedule=False, reset=None, lag=timedelta(0)):
+    # lag: how long after its scheduled time the stage runs. On AWS it is always minutes (the seven
+    # pipelines run first), so `as_of` (the scheduled time) is always in the past by then.
     return run_portfolio(
-        cycle_id(when), call_map, storage, as_of=when, now=when, chat_client=manager, model="stub",
+        cycle_id(when), call_map, storage, as_of=when, now=when + lag, chat_client=manager, model="stub",
         market_client=market, config=CONFIG, breaker_reset_at=lambda: reset, off_schedule=off_schedule,
     )
 
@@ -149,6 +151,39 @@ def test_next_cycle_resumes_from_the_last_closing_state_and_replays_a_stop_out(s
     assert shadow["stop_outs"] == []
     assert "corn" in {p["symbol_name"] for p in shadow["closing_state"]["positions"]}
 
+
+
+def test_a_stage_running_minutes_after_its_scheduled_time_fills_at_a_fresh_quote_and_replays(storage):
+    # The scheduled cycle on AWS: as_of = scheduled_time, the stage starts ~5 minutes later.
+    # Quotes and H1 bars must still be captured live (at the execution instant), or the fills
+    # have no price and the stop-out replay sees no bars.
+    lag = timedelta(minutes=5)
+    market = FakeMarket()
+    run(storage, market, CYCLE1, calls(corn=call("bullish"), soybeans=call("bearish")),
+        StubManager({"corn": 8.0, "soybeans": -2.0}), lag=lag)
+    _crash(market)
+
+    run(storage, market, CYCLE2, calls(corn=call("bullish"), soybeans=call("bearish")), StubManager(), lag=lag)
+
+    first, second = read_cycle(storage, "manager", CYCLE1), read_cycle(storage, "manager", CYCLE2)
+    assert [(f["symbol"], f["price"]) for f in first["fills"]] == [("corn", 5.01), ("soybeans", 4.99)]
+    assert first["quoted_at"] == (CYCLE1 + lag).isoformat()
+    [stop] = second["stop_outs"]  # bars up to the scheduled time were replayed
+    assert (stop["symbol"], stop["reason"]) == ("corn", "stop_out")
+
+
+def test_the_replay_never_uses_bars_after_the_scheduled_time(storage):
+    lag = timedelta(minutes=5)
+    market = FakeMarket()
+    run(storage, market, CYCLE1, calls(corn=call("bullish")), StubManager({"corn": 8.0}), lag=lag)
+    # A crash that only starts after CYCLE2's scheduled time, inside the stage's lag.
+    corn = CTRADER_SYMBOL_NAMES["corn"]
+    market.h1[corn] = [{"timestamp": CYCLE2.astimezone(timezone.utc).isoformat(), "open": 5.0, "high": 5.0,
+                        "low": 1.0, "close": 1.0, "volume": 1}]
+
+    run(storage, market, CYCLE2, calls(corn=call("bullish")), StubManager(), lag=lag)
+
+    assert read_cycle(storage, "manager", CYCLE2)["stop_outs"] == []
 
 def _into_drawdown(storage):
     market = FakeMarket()

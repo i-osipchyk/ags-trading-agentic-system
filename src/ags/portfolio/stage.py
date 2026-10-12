@@ -106,10 +106,14 @@ def _run_portfolio(
     timestamp = as_of.isoformat()
     calls = {c: (calls.get(c) if (calls.get(c) or {}).get("call") else None) for c in COMMODITIES}
 
+    # Decision inputs (specs, daily bars -> risk facts) are as of the scheduled time. Execution
+    # data is captured live at `now`, the instant the stage runs: a fill can only happen at a
+    # price available then, and on AWS `as_of` (the scheduled time) is already minutes old. The
+    # captures are stored PIT under `now`, so a replay of this cycle reads the same quotes.
     specs, quotes, risk = {}, {}, {}
     for c in COMMODITIES:
         specs[c] = get_symbol_specs(data, commodity=c, as_of=as_of, client=market_client, now=now)
-        quotes[c] = get_quote(data, commodity=c, as_of=as_of, client=market_client, now=now)
+        quotes[c] = get_quote(data, commodity=c, as_of=now, client=market_client, now=now)
         bars = get_prices(
             data, commodity=c, start=as_of.date() - timedelta(days=_DAILY_LOOKBACK_DAYS), end=as_of.date(),
             as_of=as_of, client=market_client, now=now,
@@ -128,8 +132,9 @@ def _run_portfolio(
         if prev:
             since = datetime.fromisoformat(prev["as_of"])
             held = [p["symbol_name"] for p in opening_state["positions"]]
+            # Captured now, but only bars that opened before the scheduled time (`end`).
             h1 = {
-                c: get_h1_bars(data, commodity=c, start=since, end=as_of, as_of=as_of, client=market_client, now=now)
+                c: get_h1_bars(data, commodity=c, start=since, end=as_of, as_of=now, client=market_client, now=now)
                 for c in held
             }
             stop_outs = book.replay(h1, specs, since, as_of)
@@ -150,7 +155,8 @@ def _run_portfolio(
         book.mark_to(quotes)
         closing = book.snapshot(quotes, specs)
         record = {
-            "cycle_id": cycle_id, "book": name, "as_of": timestamp, "opening_state": opening_state,
+            "cycle_id": cycle_id, "book": name, "as_of": timestamp, "quoted_at": now.isoformat(),
+            "opening_state": opening_state,
             "calls": calls, "failed_commodities": [c for c in COMMODITIES if calls[c] is None],
             "stop_outs": stop_outs, "opening_equity": snapshot["equity"],
             "breaker_active": breaker_active, "breaker_reset_applied": reset_applied, "raw_proposal": proposal,
