@@ -4,8 +4,9 @@ from datetime import date, datetime, timedelta, timezone
 
 from ags.logging.run_log import RunLog
 from ags.pipeline import run_pipeline
+from ags.tools.pit_store import ET
 
-AS_OF = date(2026, 6, 5)
+AS_OF = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
 TRIGGER = datetime(2026, 6, 5, 18, 30, 0, tzinfo=timezone.utc)
 
 _CANNED = {
@@ -276,7 +277,7 @@ class WeekdayPricesClient:
         day = start
         while day <= end:
             if day.weekday() < 5:
-                close = 5.25 if day == AS_OF - timedelta(days=2) else 4.0
+                close = 5.25 if day == AS_OF.date() - timedelta(days=2) else 4.0
                 bars.append(
                     {"date": day.isoformat(), "open": close, "high": close, "low": close, "close": close, "volume": 1}
                 )

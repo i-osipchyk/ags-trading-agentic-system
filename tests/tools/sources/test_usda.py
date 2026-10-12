@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import date, datetime
 
 from ags.tools.sources.usda import get_balance_sheet_revisions, get_usda_report
+from ags.tools.pit_store import ET, is_released
 
 
 class FakeUsdaClient:
@@ -12,7 +13,7 @@ class FakeUsdaClient:
 
     def get_report(self, report, symbol, *, as_of):
         self.calls.append((report, symbol, as_of))
-        eligible = [r for r in self._releases.get(symbol, []) if date.fromisoformat(r["release_date"]) <= as_of]
+        eligible = [r for r in self._releases.get(symbol, []) if is_released("usda_esmis", date.fromisoformat(r["release_date"]), as_of)]
         return max(eligible, key=lambda r: r["release_date"]) if eligible else None
 
 
@@ -27,10 +28,10 @@ CORN_SEP = {
 def test_get_usda_report_fetches_through_client_and_writes_pit_store(tmp_path):
     client = FakeUsdaClient({"corn": [CORN_SEP]})
 
-    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=date(2026, 10, 1), client=client)
+    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
 
     assert result["latest"] == CORN_SEP
-    assert client.calls[0] == ("wasde", "corn", date(2026, 10, 1))
+    assert client.calls[0] == ("wasde", "corn", datetime(2026, 10, 1, 16, 0, tzinfo=ET))
     stored = list((tmp_path / "usda_esmis" / "wasde" / "corn").glob("*.json"))
     assert [f.stem for f in stored] == ["2026-09-11"]
 
@@ -43,7 +44,7 @@ class LeakyUsdaClient:
 
 
 def test_get_usda_report_rejects_future_dated_release_from_client_and_does_not_store_it(tmp_path):
-    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=date(2026, 10, 1), client=LeakyUsdaClient())
+    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=LeakyUsdaClient())
 
     assert result["latest"] is None
     assert not list(tmp_path.rglob("*.json"))
@@ -52,11 +53,11 @@ def test_get_usda_report_rejects_future_dated_release_from_client_and_does_not_s
 def test_get_usda_report_second_call_for_same_as_of_is_a_cache_noop(tmp_path):
     client = FakeUsdaClient({"corn": [CORN_SEP]})
 
-    first = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=date(2026, 10, 1), client=client)
-    second = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=date(2026, 10, 1), client=client)
+    first = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
+    second = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
 
     assert second == first
-    assert [c for c in client.calls if c[2] == date(2026, 10, 1)] == [("wasde", "corn", date(2026, 10, 1))]
+    assert [c for c in client.calls if c[2] == datetime(2026, 10, 1, 16, 0, tzinfo=ET)] == [("wasde", "corn", datetime(2026, 10, 1, 16, 0, tzinfo=ET))]
 
 
 CORN_AUG = {
@@ -70,7 +71,7 @@ CORN_AUG = {
 def test_get_usda_report_includes_prior_release_and_change_from_it(tmp_path):
     client = FakeUsdaClient({"corn": [CORN_AUG, CORN_SEP]})
 
-    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=date(2026, 10, 1), client=client)
+    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
 
     assert result["latest"] == CORN_SEP
     assert result["prior"] == CORN_AUG
@@ -81,7 +82,7 @@ def test_get_usda_report_includes_prior_release_and_change_from_it(tmp_path):
 def test_get_balance_sheet_revisions_reports_loosening_when_stocks_to_use_rises(tmp_path):
     client = FakeUsdaClient({"corn": [CORN_AUG, CORN_SEP]})
 
-    result = get_balance_sheet_revisions(tmp_path, symbol="corn", as_of=date(2026, 10, 1), client=client)
+    result = get_balance_sheet_revisions(tmp_path, symbol="corn", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
 
     assert result == {
         "symbol": "corn",
@@ -95,7 +96,7 @@ def test_get_balance_sheet_revisions_reports_tightening_when_stocks_to_use_falls
     shrinking = {**CORN_SEP, "ending_stocks": 1700.0, "stocks_to_use": 10.9}
     client = FakeUsdaClient({"corn": [CORN_AUG, shrinking]})
 
-    result = get_balance_sheet_revisions(tmp_path, symbol="corn", as_of=date(2026, 10, 1), client=client)
+    result = get_balance_sheet_revisions(tmp_path, symbol="corn", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
 
     assert result["stocks_to_use_trend"] == "tightening"
 
@@ -103,7 +104,7 @@ def test_get_balance_sheet_revisions_reports_tightening_when_stocks_to_use_falls
 def test_get_balance_sheet_revisions_has_no_trend_without_a_prior_release(tmp_path):
     client = FakeUsdaClient({"corn": [CORN_SEP]})
 
-    result = get_balance_sheet_revisions(tmp_path, symbol="corn", as_of=date(2026, 10, 1), client=client)
+    result = get_balance_sheet_revisions(tmp_path, symbol="corn", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
 
     assert result == {"symbol": "corn", "ending_stocks_change": None, "stocks_to_use_change": None, "stocks_to_use_trend": None}
 
@@ -125,7 +126,7 @@ COFFEE_JUN = {
 def test_get_balance_sheet_revisions_for_coffee_reads_the_coffee_report_not_wasde(tmp_path):
     client = FakeUsdaClient({"coffee": [COFFEE_DEC, COFFEE_JUN]})
 
-    result = get_balance_sheet_revisions(tmp_path, symbol="coffee", as_of=date(2025, 7, 15), client=client)
+    result = get_balance_sheet_revisions(tmp_path, symbol="coffee", as_of=datetime(2025, 7, 15, 16, 0, tzinfo=ET), client=client)
 
     assert {report for report, _, _ in client.calls} == {"coffee_world_markets"}
     assert result == {

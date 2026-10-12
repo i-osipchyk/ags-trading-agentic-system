@@ -1,9 +1,10 @@
 import json
-from datetime import date
+from datetime import date, datetime
 
 from ags.agents.coordinator import run_coordinator
+from ags.tools.pit_store import ET
 
-AS_OF = date(2026, 6, 5)
+AS_OF = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
 
 ANALYST_OUTPUTS = {
     "technical": {"seasonality_alignment": "typical", "chart_description": "TECH-MARKER steady uptrend", "degraded": False},

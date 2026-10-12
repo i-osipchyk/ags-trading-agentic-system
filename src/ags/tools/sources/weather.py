@@ -1,12 +1,12 @@
 import io
 import zipfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Protocol
 
 import requests
 import shapefile
 
-from ags.tools.pit_store import read_pit, write_pit
+from ags.tools.pit_store import ET, is_released, read_pit, write_pit
 
 SOURCE_DROUGHT = "usdm"
 REPORT_DROUGHT = "drought_severity"
@@ -50,22 +50,23 @@ SUPPORTED_REGIONS = tuple(sorted(_STATES))
 
 
 class WeatherClient(Protocol):
-    def get_drought_conditions(self, region: str, *, as_of: date) -> dict | None: ...
-    def get_outlook(self, region: str, *, as_of: date) -> dict | None: ...
+    def get_drought_conditions(self, region: str, *, as_of: datetime) -> dict | None: ...
+    def get_outlook(self, region: str, *, as_of: datetime) -> dict | None: ...
 
 
 class DroughtMonitorClient:
     """US Drought Monitor weekly severity statistics (usdmdataservices.unl.edu)."""
 
-    def get_drought_conditions(self, region: str, *, as_of: date) -> dict | None:
+    def get_drought_conditions(self, region: str, *, as_of: datetime) -> dict | None:
         fips = _STATES[region]["fips"]
-        start = as_of - timedelta(days=60)
+        day = as_of.astimezone(ET).date()
+        start = day - timedelta(days=60)
         response = requests.get(
             _USDM_URL,
             params={
                 "aoi": fips,
                 "startdate": f"{start.month}/{start.day}/{start.year}",
-                "enddate": f"{as_of.month}/{as_of.day}/{as_of.year}",
+                "enddate": f"{day.month}/{day.day}/{day.year}",
                 "statisticsType": 1,
             },
             headers={"Accept": "application/json"},
@@ -114,12 +115,13 @@ def _point_in_shape(x: float, y: float, shape) -> bool:
     return any(_point_in_ring(x, y, shape.points[parts[i] : parts[i + 1]]) for i in range(len(parts) - 1))
 
 
-def _fetch_outlook_shapefile(product: str, as_of: date):
+def _fetch_outlook_shapefile(product: str, as_of: datetime):
     # product: "temp" or "prcp". Tries the current month's issuance first,
     # then last month's — the file naming only tells us when a product was
     # issued, not the exact day, so falling back to the prior month is the
     # only way to guarantee a release that's actually <= as_of (PIT safety).
-    for month_date in (date(as_of.year, as_of.month, 1), _prev_month(as_of)):
+    day = as_of.astimezone(ET).date()
+    for month_date in (date(day.year, day.month, 1), _prev_month(day)):
         url = f"{_CPC_BASE_URL}/monthupd_{product}_{month_date.year:04d}{month_date.month:02d}.zip"
         response = requests.get(url, timeout=30)
         if response.status_code != 200:
@@ -136,7 +138,7 @@ def _fetch_outlook_shapefile(product: str, as_of: date):
         if not records:
             continue
         fcst_date = records[0]["Fcst_Date"]
-        if fcst_date > as_of:
+        if not is_released(SOURCE_OUTLOOK, fcst_date, as_of):
             continue
 
         return records, reader.shapes(), fcst_date, records[0]["Valid_Seas"]
@@ -153,7 +155,7 @@ def _lookup_category(records: list[dict], shapes: list, lon: float, lat: float) 
 class CpcOutlookClient:
     """NOAA CPC monthly temperature/precipitation outlook (ftp.cpc.ncep.noaa.gov)."""
 
-    def get_outlook(self, region: str, *, as_of: date) -> dict | None:
+    def get_outlook(self, region: str, *, as_of: datetime) -> dict | None:
         state = _STATES[region]
 
         temp = _fetch_outlook_shapefile("temp", as_of)
@@ -184,14 +186,14 @@ class USWeatherClient:
         self._drought = DroughtMonitorClient()
         self._outlook = CpcOutlookClient()
 
-    def get_drought_conditions(self, region: str, *, as_of: date) -> dict | None:
+    def get_drought_conditions(self, region: str, *, as_of: datetime) -> dict | None:
         return self._drought.get_drought_conditions(region, as_of=as_of)
 
-    def get_outlook(self, region: str, *, as_of: date) -> dict | None:
+    def get_outlook(self, region: str, *, as_of: datetime) -> dict | None:
         return self._outlook.get_outlook(region, as_of=as_of)
 
 
-def _get_drought(data_dir, *, region: str, as_of: date, client: WeatherClient) -> dict | None:
+def _get_drought(data_dir, *, region: str, as_of: datetime, client: WeatherClient) -> dict | None:
     cached = read_pit(data_dir, source=SOURCE_DROUGHT, report=REPORT_DROUGHT, symbol=region, as_of=as_of)
     if cached is not None:
         return cached
@@ -201,7 +203,7 @@ def _get_drought(data_dir, *, region: str, as_of: date, client: WeatherClient) -
         return None
     # Defensive PIT filter: the client's own date-scoping is a request, not
     # a guarantee, per CLAUDE.md's PIT hard constraint.
-    if date.fromisoformat(record["map_date"]) > as_of:
+    if not is_released(SOURCE_DROUGHT, date.fromisoformat(record["map_date"]), as_of):
         return None
 
     write_pit(
@@ -215,7 +217,7 @@ def _get_drought(data_dir, *, region: str, as_of: date, client: WeatherClient) -
     return record
 
 
-def _get_outlook(data_dir, *, region: str, as_of: date, client: WeatherClient) -> dict | None:
+def _get_outlook(data_dir, *, region: str, as_of: datetime, client: WeatherClient) -> dict | None:
     cached = read_pit(data_dir, source=SOURCE_OUTLOOK, report=REPORT_OUTLOOK, symbol=region, as_of=as_of)
     if cached is not None:
         return cached
@@ -225,7 +227,7 @@ def _get_outlook(data_dir, *, region: str, as_of: date, client: WeatherClient) -
         return None
     # Defensive PIT filter: the client's own date-scoping is a request, not
     # a guarantee, per CLAUDE.md's PIT hard constraint.
-    if date.fromisoformat(record["issued"]) > as_of:
+    if not is_released(SOURCE_OUTLOOK, date.fromisoformat(record["issued"]), as_of):
         return None
 
     write_pit(
@@ -239,7 +241,7 @@ def _get_outlook(data_dir, *, region: str, as_of: date, client: WeatherClient) -
     return record
 
 
-def get_weather(data_dir, *, region: str, as_of: date, client: WeatherClient | None = None) -> dict:
+def get_weather(data_dir, *, region: str, as_of: datetime, client: WeatherClient | None = None) -> dict:
     if client is None:
         client = USWeatherClient()
     drought = _get_drought(data_dir, region=region, as_of=as_of, client=client)

@@ -1,7 +1,8 @@
 import json
-from datetime import date
+from datetime import date, datetime
 
 from ags.agents.weather import run_weather_analyst
+from ags.tools.pit_store import ET
 
 
 class FakeChatClient:
@@ -67,7 +68,7 @@ def _tool_call_message(name: str, arguments: dict, call_id: str = "call_1") -> d
 
 
 def test_run_weather_analyst_returns_schema_conformant_output_for_one_symbol(tmp_path):
-    as_of = date(2026, 10, 1)
+    as_of = datetime(2026, 10, 1, 16, 0, tzinfo=ET)
     weather_client = FakeWeatherClient(by_region={"IA": IOWA})
 
     chat_client = FakeChatClient(
@@ -114,7 +115,7 @@ def test_run_weather_analyst_returns_schema_conformant_output_for_one_symbol(tmp
 
 
 def test_run_weather_analyst_surfaces_degraded_true_on_a_source_failure_instead_of_aborting(tmp_path):
-    as_of = date(2026, 10, 1)
+    as_of = datetime(2026, 10, 1, 16, 0, tzinfo=ET)
 
     chat_client = FakeChatClient(
         responses=[
@@ -143,7 +144,7 @@ def test_run_weather_analyst_surfaces_degraded_true_on_a_source_failure_instead_
 
 
 def test_run_weather_analyst_surfaces_degraded_true_when_the_model_returns_unparseable_content(tmp_path):
-    as_of = date(2026, 10, 1)
+    as_of = datetime(2026, 10, 1, 16, 0, tzinfo=ET)
 
     chat_client = FakeChatClient(
         responses=[{"role": "assistant", "content": "not valid json", "tool_calls": None}] * 2

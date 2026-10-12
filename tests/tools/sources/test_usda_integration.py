@@ -1,16 +1,17 @@
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
 from ags.tools.sources import usda
 from ags.tools.sources.usda import EsmisClient, get_usda_report
+from ags.tools.pit_store import ET
 
 
 @pytest.mark.integration
 @pytest.mark.parametrize("symbol", ["corn", "soybeans", "wheat", "cotton", "sugar"])
 def test_get_usda_report_pulls_real_wasde_from_esmis_and_is_pit_safe(tmp_path, symbol):
     client = EsmisClient()
-    as_of = date(2026, 9, 20)
+    as_of = datetime(2026, 9, 20, 16, 0, tzinfo=ET)
 
     result = get_usda_report(tmp_path, report="wasde", symbol=symbol, as_of=as_of, client=client)
 
@@ -26,7 +27,7 @@ def test_get_usda_report_pulls_real_wasde_from_esmis_and_is_pit_safe(tmp_path, s
 @pytest.mark.integration
 def test_get_usda_report_pulls_real_coffee_report_from_esmis_and_is_pit_safe(tmp_path):
     result = get_usda_report(
-        tmp_path, report="coffee_world_markets", symbol="coffee", as_of=date(2025, 1, 15), client=EsmisClient()
+        tmp_path, report="coffee_world_markets", symbol="coffee", as_of=datetime(2025, 1, 15, 16, 0, tzinfo=ET), client=EsmisClient()
     )
 
     # Dec 2024 release was 2024-12-18; the 2025-06-25 one must not leak.

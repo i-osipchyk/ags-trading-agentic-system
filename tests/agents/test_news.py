@@ -1,7 +1,8 @@
 import json
-from datetime import date
+from datetime import date, datetime
 
 from ags.agents.news import run_news_analyst
+from ags.tools.pit_store import ET
 
 
 class FakeChatClient:
@@ -63,7 +64,7 @@ def _tool_call_message(name: str, arguments: dict, call_id: str = "call_1") -> d
 
 
 def test_run_news_analyst_returns_schema_conformant_output_for_one_symbol(tmp_path):
-    as_of = date(2026, 6, 5)
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
     news_client = FakeNewsClient(results=CORN_RESULTS)
 
     chat_client = FakeChatClient(
@@ -109,11 +110,11 @@ def test_run_news_analyst_returns_schema_conformant_output_for_one_symbol(tmp_pa
         }
     ]
     assert result["degraded"] is False
-    assert news_client.search_calls == [("corn futures news", as_of)]
+    assert news_client.search_calls == [("corn futures news", as_of.date())]
 
 
 def test_run_news_analyst_surfaces_degraded_true_on_a_source_failure_instead_of_aborting(tmp_path):
-    as_of = date(2026, 6, 5)
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
 
     chat_client = FakeChatClient(
         responses=[
@@ -144,7 +145,7 @@ def test_run_news_analyst_surfaces_degraded_true_when_the_model_returns_unparsea
     # forces a tools-disabled final call, the model can still emit its own
     # pseudo-tool-call markup as plain content instead of complying with the
     # "JSON only" instruction. That must degrade the run, not crash it.
-    as_of = date(2026, 6, 5)
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
 
     chat_client = FakeChatClient(
         responses=[

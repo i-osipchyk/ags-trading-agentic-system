@@ -1,7 +1,8 @@
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
 
+from ags.tools.pit_store import ET
 from ags.config import Config
 from ags.tools.sources import prices
 from ags.tools.sources.prices import CTraderPricesClient, get_prices
@@ -30,14 +31,14 @@ def test_get_prices_pulls_corn_from_real_ctrader_and_second_call_is_a_noop(tmp_p
     end = _last_weekday(date.today() - timedelta(days=1))
     start = _last_weekday(end - timedelta(days=4))
 
-    first = get_prices(tmp_path, commodity="corn", start=start, end=end, as_of=end, client=client)
+    first = get_prices(tmp_path, commodity="corn", start=start, end=end, as_of=datetime.combine(end + timedelta(days=1), time(4, 0), tzinfo=ET), client=client)
 
     assert first, "expected at least one daily bar from the real cTrader feed"
     stored_files = list((tmp_path / prices.SOURCE / prices.REPORT / "corn").glob("*.json"))
     assert stored_files, "fetch-through-cache should have written at least one PIT file"
     assert len(calls) == 1
 
-    second = get_prices(tmp_path, commodity="corn", start=start, end=end, as_of=end, client=client)
+    second = get_prices(tmp_path, commodity="corn", start=start, end=end, as_of=datetime.combine(end + timedelta(days=1), time(4, 0), tzinfo=ET), client=client)
 
     assert second == first
     assert len(calls) == 1, "second call for the same range must be a cache no-op, not a second fetch"

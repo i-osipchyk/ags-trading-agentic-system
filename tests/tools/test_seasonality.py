@@ -1,9 +1,10 @@
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import pytest
 
 from ags.tools.seasonality import get_seasonality
+from ags.tools.pit_store import ET
 
 
 def test_get_seasonality_reports_mean_and_median_return_for_as_of_iso_week_across_prior_years():
@@ -21,7 +22,7 @@ def test_get_seasonality_reports_mean_and_median_return_for_as_of_iso_week_acros
         }
     ).sort_index()
 
-    result = get_seasonality(prices, as_of=date(2024, 2, 1))
+    result = get_seasonality(prices, as_of=datetime(2024, 2, 1, 16, 0, tzinfo=ET))
 
     assert result["week"] == 5
     assert result["years_observed"] == 3

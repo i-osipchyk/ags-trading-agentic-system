@@ -280,3 +280,31 @@ def test_written_audits_are_readable_by_the_coordinators_track_record(tmp_path):
 
     assert [a["checkpoint_weeks"] for a in record[0]["audits"]] == [1, 2]
     assert record[0]["audits"][0]["direction_correct"] is False
+
+
+def test_audit_flow_runs_end_to_end_over_a_storage(tmp_path):
+    from ags.storage import LocalStorage, Prefixed
+    from ags.tools.track_record import read_track_record
+
+    root = LocalStorage(tmp_path)
+    logs, audits, data = Prefixed(root, "logs"), Prefixed(root, "audits"), Prefixed(root, "data")
+    (tmp_path / "logs").mkdir()
+    _write_full_run(tmp_path / "logs")
+    bars = _bars([150.0, 148.0, 146.0, 145.0, 144.0, 143.0, 144.0, 140.0, 139.0, 138.0, 137.0, 136.0, 135.0, 134.0, 133.0])
+
+    result = run_auditor(
+        FakeChatClient(VERDICTS), log_dir=logs, audit_dir=audits, data_dir=data,
+        model="stub-model", now=RUN_NOW, prices_client=FakePricesClient(bars),
+    )
+    again = run_auditor(
+        FakeChatClient(VERDICTS), log_dir=logs, audit_dir=audits, data_dir=data,
+        model="stub-model", now=RUN_NOW, prices_client=FakePricesClient(bars),
+    )
+    record = read_track_record(
+        logs, audits, commodity="corn", lookback_weeks=8, as_of=datetime(2026, 6, 25, tzinfo=timezone.utc)
+    )
+
+    assert result["graded"] == [(RUN_ID, 1), (RUN_ID, 2)]
+    assert again == {"graded": [], "failed": []}
+    assert sorted(p.name for p in (tmp_path / "audits" / RUN_ID).iterdir()) == ["1w.json", "2w.json"]
+    assert [a["checkpoint_weeks"] for a in record[0]["audits"]] == [1, 2]

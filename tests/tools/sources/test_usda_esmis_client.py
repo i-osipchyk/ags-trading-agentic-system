@@ -1,7 +1,8 @@
-from datetime import date
+from datetime import date, datetime
 
 from ags.tools.sources import usda
 from ags.tools.sources.usda import EsmisClient
+from ags.tools.pit_store import ET
 
 _LISTING_HTML = (
     '<a href="/sites/default/release-files/796054/wasde0926.xml" class="x">'
@@ -53,7 +54,7 @@ def test_esmis_client_parses_cotton_from_sep_2026_wasde(monkeypatch):
         _wasde_xml("sr17", [("Planted", "10.45 **"), ("Use, Total", "13.80"), ("Ending Stocks", "3.60")]),
     )
 
-    record = EsmisClient().get_report("wasde", "cotton", as_of=date(2026, 9, 20))
+    record = EsmisClient().get_report("wasde", "cotton", as_of=datetime(2026, 9, 20, 16, 0, tzinfo=ET))
 
     assert record == {
         "release_date": "2026-09-11",
@@ -74,7 +75,7 @@ def test_esmis_client_parses_sugar_from_sep_2026_wasde(monkeypatch):
         ),
     )
 
-    record = EsmisClient().get_report("wasde", "sugar", as_of=date(2026, 9, 20))
+    record = EsmisClient().get_report("wasde", "sugar", as_of=datetime(2026, 9, 20, 16, 0, tzinfo=ET))
 
     assert record == {
         "release_date": "2026-09-11",
@@ -145,7 +146,7 @@ def test_esmis_client_parses_coffee_world_balance_from_jun_2025_report(monkeypat
         ),
     )
 
-    record = EsmisClient().get_report("coffee_world_markets", "coffee", as_of=date(2025, 7, 15))
+    record = EsmisClient().get_report("coffee_world_markets", "coffee", as_of=datetime(2025, 7, 15, 16, 0, tzinfo=ET))
 
     assert record == {
         "release_date": "2025-06-25",

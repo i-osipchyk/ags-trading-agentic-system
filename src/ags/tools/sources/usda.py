@@ -1,13 +1,13 @@
 import io
 import re
 import xml.etree.ElementTree as ET
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Protocol
 
 import requests
 from pypdf import PdfReader
 
-from ags.tools.pit_store import read_pit, write_pit
+from ags.tools.pit_store import is_released, read_pit, release_instant, write_pit
 
 SOURCE = "usda_esmis"
 _FIGURES = ("ending_stocks", "stocks_to_use")
@@ -48,7 +48,7 @@ def report_for_symbol(symbol: str) -> str:
 
 
 class UsdaClient(Protocol):
-    def get_report(self, report: str, symbol: str, *, as_of: date) -> dict | None: ...
+    def get_report(self, report: str, symbol: str, *, as_of: datetime) -> dict | None: ...
 
 
 def _row_cells(row: ET.Element) -> list[tuple[str, float]]:
@@ -133,13 +133,13 @@ class EsmisClient:
             seen[path] = date.fromisoformat(day)
         return [(d, p) for p, d in seen.items()]
 
-    def _coffee_release(self, as_of: date) -> dict | None:
+    def _coffee_release(self, as_of: datetime) -> dict | None:
         response = requests.get(_COFFEE_LISTING, timeout=30)
         response.raise_for_status()
         eligible = [
             (date.fromisoformat(day), path)
             for path, day in _COFFEE_RELEASE_RE.findall(response.text)
-            if date.fromisoformat(day) <= as_of
+            if is_released(SOURCE, date.fromisoformat(day), as_of)
         ]
         if not eligible:
             return None
@@ -149,7 +149,7 @@ class EsmisClient:
         parsed = _parse_coffee(response.content)
         return None if parsed is None else {"release_date": release_date.isoformat(), **parsed}
 
-    def get_report(self, report: str, symbol: str, *, as_of: date) -> dict | None:
+    def get_report(self, report: str, symbol: str, *, as_of: datetime) -> dict | None:
         if report == "coffee_world_markets" and symbol == "coffee":
             return self._coffee_release(as_of)
         if report != "wasde" or symbol not in _WASDE_TABLES:
@@ -159,7 +159,7 @@ class EsmisClient:
             releases = self._releases(page)
             if not releases:
                 return None
-            eligible = [r for r in releases if r[0] <= as_of]
+            eligible = [r for r in releases if is_released(SOURCE, r[0], as_of)]
             if not eligible:
                 continue
             release_date, path = max(eligible)
@@ -176,7 +176,7 @@ def _direction(delta: float) -> str:
     return "up" if delta > 0 else "down" if delta < 0 else "unchanged"
 
 
-def _get_release(data_dir, *, report: str, symbol: str, as_of: date, client: UsdaClient) -> dict | None:
+def _get_release(data_dir, *, report: str, symbol: str, as_of: datetime, client: UsdaClient) -> dict | None:
     cached = read_pit(data_dir, source=SOURCE, report=report, symbol=symbol, as_of=as_of)
     if cached is not None:
         return cached
@@ -187,21 +187,21 @@ def _get_release(data_dir, *, report: str, symbol: str, as_of: date, client: Usd
     # Defensive PIT filter: the client's own date-scoping is a request, not
     # a guarantee, per CLAUDE.md's PIT hard constraint.
     release_date = date.fromisoformat(record["release_date"])
-    if release_date > as_of:
+    if not is_released(SOURCE, release_date, as_of):
         return None
 
     write_pit(data_dir, source=SOURCE, report=report, symbol=symbol, release_date=release_date, content=record)
     return record
 
 
-def get_usda_report(data_dir, *, report: str, symbol: str, as_of: date, client: UsdaClient) -> dict:
+def get_usda_report(data_dir, *, report: str, symbol: str, as_of: datetime, client: UsdaClient) -> dict:
     latest = _get_release(data_dir, report=report, symbol=symbol, as_of=as_of, client=client)
     result = {"report": report, "symbol": symbol, "latest": latest, "prior": None}
     if latest is None:
         return result
 
-    day_before_latest = date.fromisoformat(latest["release_date"]) - timedelta(days=1)
-    prior = _get_release(data_dir, report=report, symbol=symbol, as_of=day_before_latest, client=client)
+    just_before_latest = release_instant(SOURCE, date.fromisoformat(latest["release_date"])) - timedelta(microseconds=1)
+    prior = _get_release(data_dir, report=report, symbol=symbol, as_of=just_before_latest, client=client)
     result["prior"] = prior
     if prior is not None:
         change = {k: round(latest[k] - prior[k], 4) for k in _FIGURES}
@@ -210,7 +210,7 @@ def get_usda_report(data_dir, *, report: str, symbol: str, as_of: date, client: 
     return result
 
 
-def get_balance_sheet_revisions(data_dir, *, symbol: str, as_of: date, client: UsdaClient) -> dict:
+def get_balance_sheet_revisions(data_dir, *, symbol: str, as_of: datetime, client: UsdaClient) -> dict:
     result = get_usda_report(
         data_dir, report=report_for_symbol(symbol), symbol=symbol, as_of=as_of, client=client
     )

@@ -1,7 +1,8 @@
-from datetime import date
+from datetime import date, datetime, time
 
 import pytest
 
+from ags.tools.pit_store import ET
 from ags.tools.sources import weather
 from ags.tools.sources.weather import USWeatherClient, get_weather
 
@@ -19,7 +20,7 @@ def test_get_weather_pulls_iowa_conditions_from_real_sources_and_second_call_is_
 
     client.get_drought_conditions = counted_get_drought
 
-    as_of = date.today()
+    as_of = datetime.combine(date.today(), time(16, 0), tzinfo=ET)
 
     first = get_weather(tmp_path, region="IA", as_of=as_of, client=client)
 

@@ -1,7 +1,8 @@
 import json
-from datetime import date
+from datetime import date, datetime
 
 from ags.agents.supply_demand import run_supply_demand_analyst
+from ags.tools.pit_store import ET, is_released
 
 
 class FakeChatClient:
@@ -23,7 +24,7 @@ class FakeUsdaClient:
 
     def get_report(self, report, symbol, *, as_of):
         self.calls.append((report, symbol, as_of))
-        eligible = [r for r in self._releases.get(symbol, []) if date.fromisoformat(r["release_date"]) <= as_of]
+        eligible = [r for r in self._releases.get(symbol, []) if is_released("usda_esmis", date.fromisoformat(r["release_date"]), as_of)]
         return max(eligible, key=lambda r: r["release_date"]) if eligible else None
 
 
@@ -53,7 +54,7 @@ def _tool_call_message(name: str, arguments: dict, call_id: str = "call_1") -> d
 
 
 def test_run_supply_demand_analyst_returns_schema_conformant_output_for_one_symbol(tmp_path):
-    as_of = date(2026, 10, 1)
+    as_of = datetime(2026, 10, 1, 16, 0, tzinfo=ET)
     usda_client = FakeUsdaClient({"corn": [CORN_AUG, CORN_SEP]})
     chat_client = FakeChatClient(
         responses=[
@@ -88,7 +89,7 @@ def test_run_supply_demand_analyst_surfaces_degraded_true_on_a_source_failure_in
         tmp_path,
         _scripted(json.dumps({"latest_report": None, "key_figures": [], "stocks_to_use": None})),
         commodity="corn",
-        as_of=date(2026, 10, 1),
+        as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET),
         model="deepseek-chat",
         usda_client=FailingUsdaClient(),
     )
@@ -101,7 +102,7 @@ def test_run_supply_demand_analyst_surfaces_degraded_true_when_no_release_exists
         tmp_path,
         _scripted(json.dumps({"latest_report": None, "key_figures": [], "stocks_to_use": None})),
         commodity="corn",
-        as_of=date(2026, 10, 1),
+        as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET),
         model="deepseek-chat",
         usda_client=FakeUsdaClient({"corn": [{**CORN_SEP, "release_date": "2026-10-09"}]}),
     )
@@ -114,7 +115,7 @@ def test_run_supply_demand_analyst_surfaces_degraded_true_when_the_model_returns
         tmp_path,
         FakeChatClient(responses=[{"role": "assistant", "content": "not valid json", "tool_calls": None}] * 2),
         commodity="corn",
-        as_of=date(2026, 10, 1),
+        as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET),
         model="deepseek-chat",
         usda_client=FakeUsdaClient({"corn": [CORN_SEP]}),
     )
@@ -131,7 +132,7 @@ COFFEE_JUN = {
 
 
 def test_run_supply_demand_analyst_for_coffee_reads_the_coffee_report_even_if_the_model_asks_for_wasde(tmp_path):
-    as_of = date(2025, 7, 15)
+    as_of = datetime(2025, 7, 15, 16, 0, tzinfo=ET)
     usda_client = FakeUsdaClient({"coffee": [COFFEE_JUN]})
     chat_client = FakeChatClient(
         responses=[
@@ -159,7 +160,7 @@ def test_run_supply_demand_analyst_retries_once_when_the_first_final_reply_is_no
     )
 
     result = run_supply_demand_analyst(
-        tmp_path, chat_client, commodity="corn", as_of=date(2026, 10, 1), model="deepseek-chat", usda_client=usda_client
+        tmp_path, chat_client, commodity="corn", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), model="deepseek-chat", usda_client=usda_client
     )
 
     assert result["latest_report"] == ANALYST_JSON["latest_report"]
@@ -178,7 +179,7 @@ def test_run_supply_demand_analyst_degrades_after_a_single_retry_when_the_reply_
     )
 
     result = run_supply_demand_analyst(
-        tmp_path, chat_client, commodity="corn", as_of=date(2026, 10, 1), model="deepseek-chat",
+        tmp_path, chat_client, commodity="corn", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), model="deepseek-chat",
         usda_client=FakeUsdaClient(),
     )
 

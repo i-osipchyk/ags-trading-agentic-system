@@ -1,11 +1,12 @@
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.chart import get_chart_snapshot as compute_chart_snapshot
+from ags.tools.pit_store import ET
 from ags.tools.seasonality import get_seasonality as compute_seasonality
 from ags.tools.sources.prices import PricesClient
 from ags.tools.sources.prices import get_prices as fetch_prices
@@ -51,7 +52,7 @@ def run_technical_analyst(
     chat_client: ChatClient,
     *,
     commodity: str,
-    as_of: date,
+    as_of: datetime,
     model: str,
     prices_client: PricesClient | None = None,
     history_days: int = _DEFAULT_HISTORY_DAYS,
@@ -63,10 +64,11 @@ def run_technical_analyst(
     series = None
     chart_snapshot = None
 
-    history_start = as_of - timedelta(days=history_days)
+    as_of_day = as_of.astimezone(ET).date()
+    history_start = as_of_day - timedelta(days=history_days)
     try:
         history_bars = fetch_prices(
-            data_dir, commodity=commodity, start=history_start, end=as_of, as_of=as_of, client=prices_client
+            data_dir, commodity=commodity, start=history_start, end=as_of_day, as_of=as_of, client=prices_client
         )
         series = _closes_series(history_bars)
         trend = compute_trend_state(series)

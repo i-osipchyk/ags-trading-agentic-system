@@ -1,7 +1,8 @@
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
 
+from ags.tools.pit_store import ET
 from ags.agents.technical import run_technical_analyst
 from ags.config import Config
 from ags.llm.deepseek_client import DeepSeekChatClient
@@ -17,7 +18,7 @@ def _last_weekday(day: date) -> date:
 def test_run_technical_analyst_standalone_run_for_corn_against_real_sources(tmp_path):
     config = Config.from_env()
     chat_client = DeepSeekChatClient(config)
-    as_of = _last_weekday(date.today() - timedelta(days=1))
+    as_of = datetime.combine(_last_weekday(date.today() - timedelta(days=1)), time(16, 0), tzinfo=ET)
 
     result = run_technical_analyst(
         tmp_path,

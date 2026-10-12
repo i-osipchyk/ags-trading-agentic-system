@@ -1,5 +1,5 @@
 import hashlib
-from datetime import date
+from datetime import date, datetime
 from typing import Protocol
 from urllib.parse import urlparse
 
@@ -7,7 +7,7 @@ from dateutil import parser as dateutil_parser
 from tavily import TavilyClient
 
 from ags.config import Config
-from ags.tools.pit_store import read_pit, write_pit
+from ags.tools.pit_store import ET, is_released, read_pit, write_pit
 
 SOURCE = "tavily"
 REPORT_SEARCH = "search_news"
@@ -82,7 +82,7 @@ def search_news(
     *,
     commodity: str,
     query: str,
-    as_of: date,
+    as_of: datetime,
     client: NewsClient | None = None,
 ) -> list[dict]:
     symbol = _query_symbol(commodity, query)
@@ -94,14 +94,14 @@ def search_news(
     if client is None:
         client = TavilyNewsClient(Config.from_env())
 
-    raw_results = client.search(query, published_before=as_of)
+    raw_results = client.search(query, published_before=as_of.astimezone(ET).date())
     # Defensive PIT filter: the client's own date-scoping is a request, not a
     # guarantee, and a result with no publish date can't be proven safe —
     # dropped rather than assumed safe, per CLAUDE.md's PIT hard constraint.
     results = [
         result
         for result in raw_results
-        if result.get("date") is not None and date.fromisoformat(result["date"]) <= as_of
+        if result.get("date") is not None and is_released(SOURCE, date.fromisoformat(result["date"]), as_of)
     ]
 
     write_pit(
@@ -120,7 +120,7 @@ def fetch_document(
     data_dir,
     *,
     url: str,
-    as_of: date,
+    as_of: datetime,
     client: NewsClient | None = None,
 ) -> dict:
     symbol = _url_symbol(url)

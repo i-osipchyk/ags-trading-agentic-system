@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import datetime
 
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.sources.news import NewsClient
@@ -28,7 +28,7 @@ def run_news_analyst(
     chat_client: ChatClient,
     *,
     commodity: str,
-    as_of: date,
+    as_of: datetime,
     model: str,
     news_client: NewsClient | None = None,
 ) -> dict:

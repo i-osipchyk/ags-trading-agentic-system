@@ -1,7 +1,8 @@
 import json
-from datetime import date
+from datetime import date, datetime
 
 from ags.tools.sources.weather import get_weather
+from ags.tools.pit_store import ET
 
 
 class FakeWeatherClient:
@@ -41,11 +42,11 @@ IOWA_OUTLOOK = {
 def test_get_weather_fetches_drought_conditions_through_client_and_writes_pit_store(tmp_path):
     client = FakeWeatherClient(drought_by_region={"IA": IOWA_DROUGHT}, outlook_by_region={"IA": IOWA_OUTLOOK})
 
-    result = get_weather(tmp_path, region="IA", as_of=date(2026, 10, 1), client=client)
+    result = get_weather(tmp_path, region="IA", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
 
     assert result["drought"] == IOWA_DROUGHT
     assert len(client.drought_calls) == 1
-    assert client.drought_calls[0] == ("IA", date(2026, 10, 1))
+    assert client.drought_calls[0] == ("IA", datetime(2026, 10, 1, 16, 0, tzinfo=ET))
 
     stored_files = list((tmp_path / "usdm" / "drought_severity" / "IA").glob("*.json"))
     assert len(stored_files) == 1
@@ -55,8 +56,8 @@ def test_get_weather_fetches_drought_conditions_through_client_and_writes_pit_st
 def test_get_weather_second_call_for_the_same_week_is_a_noop(tmp_path):
     client = FakeWeatherClient(drought_by_region={"IA": IOWA_DROUGHT}, outlook_by_region={"IA": IOWA_OUTLOOK})
 
-    first = get_weather(tmp_path, region="IA", as_of=date(2026, 10, 1), client=client)
-    second = get_weather(tmp_path, region="IA", as_of=date(2026, 10, 2), client=client)
+    first = get_weather(tmp_path, region="IA", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
+    second = get_weather(tmp_path, region="IA", as_of=datetime(2026, 10, 2, 16, 0, tzinfo=ET), client=client)
 
     assert second["drought"] == first["drought"]
     assert len(client.drought_calls) == 1
@@ -68,7 +69,7 @@ def test_get_weather_drops_a_drought_record_dated_after_as_of(tmp_path):
     future_dated = {**IOWA_DROUGHT, "map_date": "2026-10-10"}
     client = FakeWeatherClient(drought_by_region={"IA": future_dated})
 
-    result = get_weather(tmp_path, region="IA", as_of=date(2026, 10, 1), client=client)
+    result = get_weather(tmp_path, region="IA", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
 
     assert result["drought"] is None
 
@@ -76,11 +77,11 @@ def test_get_weather_drops_a_drought_record_dated_after_as_of(tmp_path):
 def test_get_weather_fetches_outlook_through_client_and_writes_pit_store(tmp_path):
     client = FakeWeatherClient(drought_by_region={"IA": IOWA_DROUGHT}, outlook_by_region={"IA": IOWA_OUTLOOK})
 
-    result = get_weather(tmp_path, region="IA", as_of=date(2026, 10, 1), client=client)
+    result = get_weather(tmp_path, region="IA", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
 
     assert result["outlook"] == IOWA_OUTLOOK
     assert len(client.outlook_calls) == 1
-    assert client.outlook_calls[0] == ("IA", date(2026, 10, 1))
+    assert client.outlook_calls[0] == ("IA", datetime(2026, 10, 1, 16, 0, tzinfo=ET))
 
     stored_files = list((tmp_path / "noaa_cpc" / "monthly_outlook" / "IA").glob("*.json"))
     assert len(stored_files) == 1
@@ -91,6 +92,6 @@ def test_get_weather_drops_an_outlook_record_dated_after_as_of(tmp_path):
     future_dated = {**IOWA_OUTLOOK, "issued": "2026-10-10"}
     client = FakeWeatherClient(outlook_by_region={"IA": future_dated})
 
-    result = get_weather(tmp_path, region="IA", as_of=date(2026, 10, 1), client=client)
+    result = get_weather(tmp_path, region="IA", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
 
     assert result["outlook"] is None

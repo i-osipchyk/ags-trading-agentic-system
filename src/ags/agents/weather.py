@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import datetime
 
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.growing_calendar import get_growing_calendar as compute_growing_calendar
@@ -30,7 +30,7 @@ def run_weather_analyst(
     chat_client: ChatClient,
     *,
     commodity: str,
-    as_of: date,
+    as_of: datetime,
     model: str,
     weather_client: WeatherClient | None = None,
 ) -> dict:

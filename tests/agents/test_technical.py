@@ -1,7 +1,8 @@
 import json
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 from ags.agents.technical import run_technical_analyst
+from ags.tools.pit_store import ET
 
 
 class FakeChatClient:
@@ -54,8 +55,8 @@ def _rising_corn_bars(as_of: date, flat_days: int = 400, rise_days: int = 150) -
 
 
 def test_run_technical_analyst_returns_schema_conformant_output_for_one_symbol(tmp_path):
-    as_of = date(2026, 6, 5)
-    bars = _rising_corn_bars(as_of)
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
+    bars = _rising_corn_bars(as_of.date())
     prices_client = FakePricesClient({"Corn": bars})
 
     chat_client = FakeChatClient(
@@ -125,7 +126,7 @@ def test_run_technical_analyst_returns_schema_conformant_output_for_one_symbol(t
 
 
 def test_run_technical_analyst_surfaces_degraded_true_on_a_source_failure_instead_of_aborting(tmp_path):
-    as_of = date(2026, 6, 5)
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
 
     chat_client = FakeChatClient(
         responses=[
@@ -158,7 +159,7 @@ def test_run_technical_analyst_surfaces_degraded_true_on_a_source_failure_instea
 
 
 def test_run_technical_analyst_degrades_instead_of_raising_when_the_model_never_returns_json(tmp_path):
-    as_of = date(2026, 6, 5)
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
     chat_client = FakeChatClient(
         responses=[{"role": "assistant", "content": "I could not produce JSON.", "tool_calls": None}] * 2
     )
@@ -169,7 +170,7 @@ def test_run_technical_analyst_degrades_instead_of_raising_when_the_model_never_
         commodity="corn",
         as_of=as_of,
         model="deepseek-chat",
-        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of)}),
+        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of.date())}),
         history_days=550,
     )
 
@@ -183,7 +184,7 @@ def test_run_technical_analyst_degrades_instead_of_raising_when_the_model_never_
 
 
 def test_run_technical_analyst_retries_once_when_the_first_reply_is_not_json(tmp_path):
-    as_of = date(2026, 6, 5)
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
     good = {"seasonality_alignment": "typical", "key_levels": {}, "chart_description": "flat"}
     chat_client = FakeChatClient(
         responses=[
@@ -198,7 +199,7 @@ def test_run_technical_analyst_retries_once_when_the_first_reply_is_not_json(tmp
         commodity="corn",
         as_of=as_of,
         model="deepseek-chat",
-        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of)}),
+        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of.date())}),
         history_days=550,
     )
 

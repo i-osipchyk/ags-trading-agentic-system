@@ -2,11 +2,16 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ags.storage import Storage, as_storage
+
 
 class RunLog:
-    def __init__(self, log_dir: Path, run_id: str) -> None:
-        self._path = Path(log_dir) / f"{run_id}.jsonl"
-        self._next_seq = len(self.read()) if self._path.exists() else 0
+    def __init__(self, log_dir: Storage | Path, run_id: str) -> None:
+        self._store = as_storage(log_dir)
+        self._key = f"{run_id}.jsonl"
+        existing = self._store.get(self._key)
+        self._lines = existing.decode().splitlines() if existing is not None else []
+        self._next_seq = len(self._lines)
 
     def append(self, *, agent: str, event_type: str, payload: dict) -> None:
         event = {
@@ -16,10 +21,14 @@ class RunLog:
             "payload": payload,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        with self._path.open("a") as f:
-            f.write(json.dumps(event) + "\n")
+        # The Storage protocol has no append, so each event rewrites the log;
+        # persisting per event keeps a partial log if the run dies mid-way.
+        self._lines.append(json.dumps(event))
+        self._store.put(self._key, ("\n".join(self._lines) + "\n").encode())
         self._next_seq += 1
 
     def read(self) -> list[dict]:
-        with self._path.open("r") as f:
-            return [json.loads(line) for line in f]
+        data = self._store.get(self._key)
+        if data is None:
+            raise FileNotFoundError(self._key)
+        return [json.loads(line) for line in data.decode().splitlines()]

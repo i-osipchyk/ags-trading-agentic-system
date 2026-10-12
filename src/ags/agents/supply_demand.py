@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import datetime
 
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.sources.usda import EsmisClient, UsdaClient
@@ -29,7 +29,7 @@ def run_supply_demand_analyst(
     chat_client: ChatClient,
     *,
     commodity: str,
-    as_of: date,
+    as_of: datetime,
     model: str,
     usda_client: UsdaClient | None = None,
 ) -> dict:

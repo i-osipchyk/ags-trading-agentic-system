@@ -1,7 +1,8 @@
 import json
-from datetime import date
+from datetime import date, datetime
 
 from ags.tools.sources.news import fetch_document, search_news
+from ags.tools.pit_store import ET
 
 
 class FakeNewsClient:
@@ -45,7 +46,7 @@ def test_search_news_fetches_through_client_and_writes_pit_store(tmp_path):
         tmp_path,
         commodity="corn",
         query="corn futures news",
-        as_of=date(2026, 6, 5),
+        as_of=datetime(2026, 6, 5, 16, 0, tzinfo=ET),
         client=client,
     )
 
@@ -63,8 +64,8 @@ def test_search_news_fetches_through_client_and_writes_pit_store(tmp_path):
 def test_search_news_second_call_for_same_commodity_query_and_as_of_is_a_noop(tmp_path):
     client = FakeNewsClient(CORN_RESULTS)
 
-    first = search_news(tmp_path, commodity="corn", query="corn futures news", as_of=date(2026, 6, 5), client=client)
-    second = search_news(tmp_path, commodity="corn", query="corn futures news", as_of=date(2026, 6, 5), client=client)
+    first = search_news(tmp_path, commodity="corn", query="corn futures news", as_of=datetime(2026, 6, 5, 16, 0, tzinfo=ET), client=client)
+    second = search_news(tmp_path, commodity="corn", query="corn futures news", as_of=datetime(2026, 6, 5, 16, 0, tzinfo=ET), client=client)
 
     assert second == first
     assert len(client.search_calls) == 1
@@ -89,7 +90,7 @@ def test_search_news_drops_results_dated_after_as_of(tmp_path):
     }
     client = FakeNewsClient(CORN_RESULTS + [future_dated, undated])
 
-    result = search_news(tmp_path, commodity="corn", query="corn futures news", as_of=date(2026, 6, 5), client=client)
+    result = search_news(tmp_path, commodity="corn", query="corn futures news", as_of=datetime(2026, 6, 5, 16, 0, tzinfo=ET), client=client)
 
     assert result == CORN_RESULTS
 
@@ -101,7 +102,7 @@ CORN_ARTICLE = {"url": CORN_ARTICLE_URL, "text": "Full article text about record
 def test_fetch_document_fetches_through_client_and_writes_pit_store(tmp_path):
     client = FakeNewsClient(documents={CORN_ARTICLE_URL: CORN_ARTICLE})
 
-    result = fetch_document(tmp_path, url=CORN_ARTICLE_URL, as_of=date(2026, 6, 5), client=client)
+    result = fetch_document(tmp_path, url=CORN_ARTICLE_URL, as_of=datetime(2026, 6, 5, 16, 0, tzinfo=ET), client=client)
 
     assert result == CORN_ARTICLE
     assert client.extract_calls == [CORN_ARTICLE_URL]
@@ -114,8 +115,8 @@ def test_fetch_document_fetches_through_client_and_writes_pit_store(tmp_path):
 def test_fetch_document_second_call_for_same_url_is_a_noop(tmp_path):
     client = FakeNewsClient(documents={CORN_ARTICLE_URL: CORN_ARTICLE})
 
-    first = fetch_document(tmp_path, url=CORN_ARTICLE_URL, as_of=date(2026, 6, 5), client=client)
-    second = fetch_document(tmp_path, url=CORN_ARTICLE_URL, as_of=date(2026, 6, 6), client=client)
+    first = fetch_document(tmp_path, url=CORN_ARTICLE_URL, as_of=datetime(2026, 6, 5, 16, 0, tzinfo=ET), client=client)
+    second = fetch_document(tmp_path, url=CORN_ARTICLE_URL, as_of=datetime(2026, 6, 6, 16, 0, tzinfo=ET), client=client)
 
     assert second == first
     assert client.extract_calls == [CORN_ARTICLE_URL]

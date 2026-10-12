@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import datetime
 from typing import Callable
 
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
@@ -92,7 +92,7 @@ def run_coordinator(
     chat_client: ChatClient,
     *,
     commodity: str,
-    as_of: date,
+    as_of: datetime,
     model: str,
     analyst_outputs: dict,
     price_at_call: dict | None = None,

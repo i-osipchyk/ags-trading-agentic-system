@@ -1,7 +1,7 @@
 import asyncio
 import json
 import threading
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from ags.agents.coordinator import run_coordinator
@@ -12,6 +12,7 @@ from ags.agents.weather import run_weather_analyst
 from ags.llm.loop import ChatClient
 from ags.logging.run_id import generate_run_id
 from ags.logging.run_log import RunLog
+from ags.tools.pit_store import ET
 from ags.tools.sources.prices import get_prices
 from ags.tools.track_record import read_track_record
 
@@ -74,12 +75,15 @@ class LoggingChatClient:
         self._run_log.append(agent=self._agent, event_type=event_type, payload=payload)
 
 
-def _price_at_call(data_dir: Path, commodity: str, as_of: date, prices_client) -> dict | None:
+def _price_at_call(data_dir: Path, commodity: str, as_of: datetime, prices_client) -> dict | None:
     # Deterministic fact, stamped by code — never asked of the model. A week
     # lookback spans weekends/holidays so the latest trading close is found.
     try:
         bars = get_prices(
-            data_dir, commodity=commodity, start=as_of - timedelta(days=7), end=as_of, as_of=as_of, client=prices_client
+            data_dir, commodity=commodity, start=as_of.astimezone(ET).date() - timedelta(days=7),
+            end=as_of.astimezone(ET).date(),
+            as_of=as_of,
+            client=prices_client,
         )
     except Exception:
         return None
@@ -91,7 +95,7 @@ def _price_at_call(data_dir: Path, commodity: str, as_of: date, prices_client) -
 def run_pipeline(
     *,
     commodity: str,
-    as_of: date,
+    as_of: datetime,
     trigger_timestamp: datetime,
     chat_client: ChatClient,
     model: str,
@@ -104,8 +108,6 @@ def run_pipeline(
     usda_client=None,
 ) -> dict:
     run_id = generate_run_id(commodity, trigger_timestamp)
-    log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
     run_log = _SharedRunLog(RunLog(log_dir, run_id))
     common = {"commodity": commodity, "as_of": as_of, "model": model}
 

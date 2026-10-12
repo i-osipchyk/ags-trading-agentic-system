@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -20,10 +20,11 @@ from twisted.internet.defer import Deferred
 from twisted.python.failure import Failure
 
 from ags.config import Config
-from ags.tools.pit_store import read_pit, write_pit
+from ags.tools.pit_store import ET, end_of_day, read_pit, write_pit
 
 SOURCE = "ctrader"
 REPORT = "daily_bars"
+SESSION_CLOSE_ET = time(17, 0)
 
 _PRICE_SCALE = 100_000
 
@@ -194,20 +195,24 @@ def get_prices(
     commodity: str,
     start: date,
     end: date,
-    as_of: date,
+    as_of: datetime,
     client: PricesClient | None = None,
-    today: date | None = None,
+    now: datetime | None = None,
 ) -> list[dict]:
     """Daily bars keyed by the session they cover (Mon-Fri), not by cTrader's open-time stamp.
 
-    A session is only public once it has closed, so a bar is returned only for
-    sessions strictly before `as_of` (and before the real today). A Saturday or
-    Sunday run therefore sees Friday's close as its latest bar, and a bar for a
+    A session is only public once it has closed (SESSION_CLOSE_ET), so a bar
+    is returned only for sessions already closed at `as_of` (and at the real
+    now). A 04:00 ET run therefore never sees the in-progress session, and a
+    Saturday or Sunday run sees Friday's close as its latest bar. A bar for a
     session still in progress is never read or cached — caching "no bar yet"
     for it would otherwise stick forever (the PIT cache is immutable).
     """
-    today = today or datetime.now(timezone.utc).date()
-    last_session = min(end, min(as_of, today) - timedelta(days=1))
+    if as_of.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    now = now or datetime.now(timezone.utc)
+    cutoff = min(as_of, now).astimezone(ET)
+    last_session = min(end, (cutoff - timedelta(hours=SESSION_CLOSE_ET.hour, minutes=SESSION_CLOSE_ET.minute)).date())
     # The PIT cache stays keyed by cTrader's own stamp date.
     stamp_start = start - timedelta(days=1)
     stamp_end = last_session - timedelta(days=1)
@@ -216,7 +221,7 @@ def get_prices(
     missing_days: list[date] = []
     day = stamp_start
     while day <= stamp_end:
-        release = read_pit(data_dir, source=SOURCE, report=REPORT, symbol=commodity, as_of=day)
+        release = read_pit(data_dir, source=SOURCE, report=REPORT, symbol=commodity, as_of=end_of_day(day))
         if release is not None and release["date"] == day.isoformat():
             if not release.get("no_trading"):
                 bars_by_date[day] = release

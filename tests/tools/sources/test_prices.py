@@ -1,7 +1,10 @@
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from ags.tools.sources.prices import get_prices
+
+ET = ZoneInfo("America/New_York")
 
 
 class FakeCTraderClient:
@@ -35,7 +38,7 @@ def test_get_prices_fetches_through_client_and_writes_pit_store(tmp_path):
         commodity="corn",
         start=date(2026, 1, 6),
         end=date(2026, 1, 8),
-        as_of=date(2026, 1, 9),
+        as_of=datetime(2026, 1, 9, 4, 0, tzinfo=ET),
         client=client,
     )
 
@@ -47,7 +50,7 @@ def test_get_prices_fetches_through_client_and_writes_pit_store(tmp_path):
 
 def test_get_prices_second_call_for_same_range_is_a_noop(tmp_path):
     client = FakeCTraderClient({"Corn": CORN_BARS})
-    kwargs = dict(commodity="corn", start=date(2026, 1, 6), end=date(2026, 1, 8), as_of=date(2026, 1, 9), client=client)
+    kwargs = dict(commodity="corn", start=date(2026, 1, 6), end=date(2026, 1, 8), as_of=datetime(2026, 1, 9, 4, 0, tzinfo=ET), client=client)
 
     get_prices(tmp_path, **kwargs)
     result = get_prices(tmp_path, **kwargs)
@@ -61,7 +64,7 @@ def test_get_prices_second_call_is_a_noop_when_range_includes_a_non_trading_day(
     # stamped Thursday. The cache must remember "no bar here" rather than
     # treating the gap as still-missing on every call.
     client = FakeCTraderClient({"Corn": CORN_BARS})
-    kwargs = dict(commodity="corn", start=date(2026, 1, 9), end=date(2026, 1, 12), as_of=date(2026, 1, 13), client=client)
+    kwargs = dict(commodity="corn", start=date(2026, 1, 9), end=date(2026, 1, 12), as_of=datetime(2026, 1, 13, 4, 0, tzinfo=ET), client=client)
 
     get_prices(tmp_path, **kwargs)
     get_prices(tmp_path, **kwargs)
@@ -77,7 +80,7 @@ def test_get_prices_never_requests_sessions_that_have_not_closed_by_as_of(tmp_pa
         commodity="corn",
         start=date(2026, 1, 6),
         end=date(2026, 1, 8),
-        as_of=date(2026, 1, 7),
+        as_of=datetime(2026, 1, 7, 4, 0, tzinfo=ET),
         client=client,
     )
 
@@ -96,7 +99,7 @@ def test_get_prices_on_a_saturday_returns_fridays_close_as_the_latest_bar(tmp_pa
         commodity="corn",
         start=date(2026, 1, 3),
         end=date(2026, 1, 10),
-        as_of=date(2026, 1, 10),
+        as_of=datetime(2026, 1, 10, 4, 0, tzinfo=ET),
         client=client,
     )
 
@@ -113,7 +116,7 @@ def test_get_prices_on_a_sunday_excludes_the_monday_session_stamped_that_day(tmp
         commodity="corn",
         start=date(2026, 1, 3),
         end=date(2026, 1, 11),
-        as_of=date(2026, 1, 11),
+        as_of=datetime(2026, 1, 11, 4, 0, tzinfo=ET),
         client=client,
     )
 
@@ -130,9 +133,9 @@ def test_get_prices_does_not_cache_a_session_that_has_not_closed_yet(tmp_path):
         commodity="corn",
         start=date(2026, 1, 5),
         end=date(2026, 1, 20),
-        as_of=date(2026, 1, 20),
+        as_of=datetime(2026, 1, 20, 4, 0, tzinfo=ET),
         client=client,
-        today=date(2026, 1, 8),
+        now=datetime(2026, 1, 8, 4, 0, tzinfo=ET),
     )
 
     cached = {p.stem for p in (tmp_path / "ctrader" / "daily_bars" / "corn").glob("*.json")}
@@ -163,7 +166,7 @@ def test_get_prices_closes_the_client_it_creates_for_itself(tmp_path, monkeypatc
     monkeypatch.setattr("ags.tools.sources.prices.CTraderPricesClient", FakeOwnedClient)
     monkeypatch.setattr("ags.tools.sources.prices.Config", FakeConfig)
 
-    get_prices(tmp_path, commodity="corn", start=date(2026, 1, 5), end=date(2026, 1, 7), as_of=date(2026, 1, 7))
+    get_prices(tmp_path, commodity="corn", start=date(2026, 1, 5), end=date(2026, 1, 7), as_of=datetime(2026, 1, 7, 4, 0, tzinfo=ET))
 
     assert closed == [True]
 
@@ -179,6 +182,52 @@ def test_get_prices_does_not_close_a_client_the_caller_provided(tmp_path):
 
     client = TrackedClient({"Corn": CORN_BARS})
 
-    get_prices(tmp_path, commodity="corn", start=date(2026, 1, 5), end=date(2026, 1, 7), as_of=date(2026, 1, 7), client=client)
+    get_prices(tmp_path, commodity="corn", start=date(2026, 1, 5), end=date(2026, 1, 7), as_of=datetime(2026, 1, 7, 4, 0, tzinfo=ET), client=client)
 
     assert closed == []
+
+
+def test_get_prices_at_0400_et_never_sees_that_days_partial_daily_bar(tmp_path):
+    client = FakeCTraderClient({"Corn": CORN_BARS})
+
+    result = get_prices(
+        tmp_path,
+        commodity="corn",
+        start=date(2026, 1, 5),
+        end=date(2026, 1, 8),
+        as_of=datetime(2026, 1, 7, 4, 0, tzinfo=ET),
+        client=client,
+    )
+
+    # The 01-07 session is in progress at 04:00 ET on 01-07: its last public bar is 01-06's.
+    assert [bar["date"] for bar in result] == ["2026-01-06"]
+
+
+def test_get_prices_at_1600_et_still_excludes_the_session_that_closes_at_1700_et(tmp_path):
+    client = FakeCTraderClient({"Corn": CORN_BARS})
+
+    result = get_prices(
+        tmp_path,
+        commodity="corn",
+        start=date(2026, 1, 5),
+        end=date(2026, 1, 8),
+        as_of=datetime(2026, 1, 7, 16, 0, tzinfo=ET),
+        client=client,
+    )
+
+    assert [bar["date"] for bar in result] == ["2026-01-06"]
+
+
+def test_get_prices_includes_the_session_once_it_has_closed_at_1700_et(tmp_path):
+    client = FakeCTraderClient({"Corn": CORN_BARS})
+
+    result = get_prices(
+        tmp_path,
+        commodity="corn",
+        start=date(2026, 1, 5),
+        end=date(2026, 1, 8),
+        as_of=datetime(2026, 1, 7, 17, 0, tzinfo=ET),
+        client=client,
+    )
+
+    assert [bar["date"] for bar in result] == ["2026-01-06", "2026-01-07"]

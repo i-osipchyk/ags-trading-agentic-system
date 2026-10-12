@@ -1,7 +1,8 @@
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
 
+from ags.tools.pit_store import ET
 from ags.config import Config
 from ags.tools.sources import news
 from ags.tools.sources.news import TavilyNewsClient, fetch_document, search_news
@@ -21,7 +22,7 @@ def test_search_news_pulls_corn_headlines_from_real_tavily_and_second_call_is_a_
 
     client.search = counted_search
 
-    as_of = date.today() - timedelta(days=1)
+    as_of = datetime.combine(date.today() - timedelta(days=1), time(16, 0), tzinfo=ET)
 
     first = search_news(tmp_path, commodity="corn", query="corn futures news", as_of=as_of, client=client)
 

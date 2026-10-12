@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from ags.llm.loop import ChatClient, run_loop
+from ags.storage import Storage, as_storage
 from ags.tools.sources.prices import PricesClient, get_prices
 from ags.tools.trend import get_trend_state
 
@@ -43,9 +44,9 @@ Respond with a JSON object containing exactly these fields:
 No other text — JSON only."""
 
 
-def _outputs(log_path: Path) -> dict[str, dict]:
+def _outputs(log_store: Storage, run_id: str) -> dict[str, dict]:
     outputs = {}
-    for line in log_path.read_text().splitlines():
+    for line in log_store.get(f"{run_id}.jsonl").decode().splitlines():
         event = json.loads(line)
         if event["event_type"] == "output":
             outputs[event["agent"]] = event["payload"]
@@ -53,22 +54,26 @@ def _outputs(log_path: Path) -> dict[str, dict]:
 
 
 def find_due_checkpoints(
-    log_dir: Path, audit_dir: Path, *, now: datetime, only: tuple[str, int] | None = None
+    log_dir: Storage | Path, audit_dir: Storage | Path, *, now: datetime, only: tuple[str, int] | None = None
 ) -> list[tuple[str, int]]:
+    log_store, audit_store = as_storage(log_dir), as_storage(audit_dir)
     due = []
-    for log_path in sorted(Path(log_dir).glob("*.jsonl")):
-        triggered = _triggered_at(log_path.stem)
+    for key in log_store.list(""):
+        if "/" in key or not key.endswith(".jsonl"):
+            continue
+        run_id = key.removesuffix(".jsonl")
+        triggered = _triggered_at(run_id)
         if triggered is None:
             continue
-        output = _outputs(log_path).get("coordinator")
+        output = _outputs(log_store, run_id).get("coordinator")
         if output is None or output.get("call") is None:
             continue
         for weeks in CHECKPOINT_WEEKS:
-            graded = Path(audit_dir, log_path.stem, f"{weeks}w.json").exists()
-            if only is not None and only != (log_path.stem, weeks):
+            graded = audit_store.get(f"{run_id}/{weeks}w.json") is not None
+            if only is not None and only != (run_id, weeks):
                 continue
             if triggered + timedelta(weeks=weeks) <= now and not graded:
-                due.append((log_path.stem, weeks))
+                due.append((run_id, weeks))
     return due
 
 
@@ -77,22 +82,22 @@ def _closes(bars: list[dict]) -> pd.Series:
 
 
 def _price_outcome(
-    data_dir: Path, *, commodity: str, call_day: date, checkpoint_day: date, start_price: float, prices_client
+    data_dir: Path, *, commodity: str, call_day: date, checkpoint_at: datetime, start_price: float, prices_client
 ) -> dict:
-    # as_of is the checkpoint date, so nothing newer than the checkpoint can be read.
+    # as_of is the checkpoint instant, so nothing newer than the checkpoint can be read.
     bars = get_prices(
         data_dir,
         commodity=commodity,
         start=call_day - timedelta(days=_TREND_HISTORY_DAYS),
-        end=checkpoint_day,
-        as_of=checkpoint_day,
+        end=checkpoint_at.date(),
+        as_of=checkpoint_at,
         client=prices_client,
     )
     closes = _closes(bars)
     at_call = closes[closes.index <= pd.Timestamp(call_day)]
     path = closes[closes.index > pd.Timestamp(call_day)]
     if path.empty:
-        raise ValueError(f"no price data after {call_day} up to {checkpoint_day}")
+        raise ValueError(f"no price data after {call_day} up to {checkpoint_at.date()}")
 
     end_price = float(path.iloc[-1])
     ret = end_price / start_price - 1
@@ -129,31 +134,31 @@ def _validate_verdicts(parsed: dict) -> None:
 def grade_checkpoint(
     chat_client: ChatClient,
     *,
-    log_dir: Path,
-    data_dir: Path,
+    log_dir: Storage | Path,
+    data_dir: Storage | Path,
     run_id: str,
     weeks: int,
     model: str,
     now: datetime,
     prices_client: PricesClient | None = None,
 ) -> dict:
-    outputs = _outputs(Path(log_dir) / f"{run_id}.jsonl")
+    outputs = _outputs(as_storage(log_dir), run_id)
     call = outputs["coordinator"]
     triggered = _triggered_at(run_id)
     commodity = run_id.split("_")[0]
-    checkpoint_day = (triggered + timedelta(weeks=weeks)).date()
+    checkpoint_at = triggered + timedelta(weeks=weeks)
 
     price_outcome = _price_outcome(
         data_dir,
         commodity=commodity,
         call_day=triggered.date(),
-        checkpoint_day=checkpoint_day,
+        checkpoint_at=checkpoint_at,
         start_price=call["price_at_call"]["price"],
         prices_client=prices_client,
     )
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        commodity=commodity, weeks=weeks, checkpoint_date=checkpoint_day.isoformat()
+        commodity=commodity, weeks=weeks, checkpoint_date=checkpoint_at.date().isoformat()
     )
     user_prompt = (
         "Frozen run record (analyst outputs and the coordinator's call):\n"
@@ -178,9 +183,9 @@ def grade_checkpoint(
 def run_auditor(
     chat_client: ChatClient,
     *,
-    log_dir: Path,
-    audit_dir: Path,
-    data_dir: Path,
+    log_dir: Storage | Path,
+    audit_dir: Storage | Path,
+    data_dir: Storage | Path,
     model: str,
     now: datetime,
     prices_client: PricesClient | None = None,
@@ -203,8 +208,6 @@ def run_auditor(
             # Nothing is written, so the pair stays due and the next scan retries it.
             failed.append(((run_id, weeks), f"{type(exc).__name__}: {exc}"))
             continue
-        path = Path(audit_dir) / run_id / f"{weeks}w.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(audit, indent=2))
+        as_storage(audit_dir).put(f"{run_id}/{weeks}w.json", json.dumps(audit, indent=2).encode())
         graded.append((run_id, weeks))
     return {"graded": graded, "failed": failed}
