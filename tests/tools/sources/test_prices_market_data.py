@@ -34,6 +34,7 @@ def test_symbol_specs_are_flattened_to_plain_values_with_margin_rate_from_levera
         "swap_type": "PIPS",
         "triple_swap_day": "WEDNESDAY",
         "digits": 2,
+        "pip_position": 1,
         # 20:1 on the first tier (leverage is sent in cents of a ratio)
         "margin_rate": 0.05,
         "leverage_tiers": [{"volume": 0, "leverage": 20.0}, {"volume": 10_000_000, "leverage": 10.0}],

@@ -95,6 +95,7 @@ def parse_symbol_specs(symbol, leverage) -> dict:
         "swap_type": ProtoOASwapCalculationType.Name(symbol.swapCalculationType),
         "triple_swap_day": ProtoOADayOfWeek.Name(symbol.swapRollover3Days),
         "digits": symbol.digits,
+        "pip_position": symbol.pipPosition,
         "margin_rate": 1 / tiers[0]["leverage"],
         "leverage_tiers": tiers,
     }
