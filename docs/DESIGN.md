@@ -20,7 +20,7 @@ The portfolio stage runs once per cycle, after all seven commodity pipelines fin
 
 ## Orchestration flow
 
-Scheduled: **16:00 and 04:00 ET, Monday–Friday**, no weekend runs. 16:00 is after every market in the basket has closed (clean daily marks; on Fridays, 30 minutes after Commitments of Traders). 04:00 picks up overnight news and the Asia/Europe sessions before the US open; its marks come from thin overnight trading and are noisier — accepted for a paper book.
+Scheduled: **16:00 and 04:00 ET, Monday–Friday**, no weekend runs. 16:00 is after every market in the basket has closed (clean daily marks; on Fridays, 30 minutes after Commitments of Traders). 04:00 picks up the Asia/Europe sessions before the US open; its marks come from thin overnight trading and are noisier — accepted for a paper book. News is searched on the 16:00 cycle only; 04:00 carries it forward (see News analyst).
 
 1. The scheduler starts a cycle, tagged with a `cycle_id` and trigger timestamp.
 2. For each of the seven commodities, in parallel, a commodity pipeline runs under its own `run_id` (sharing the cycle's trigger timestamp):
@@ -85,6 +85,8 @@ Reports what's being said, not why it matters — no macro or technical commenta
 **Output schema**
 
 A deduped list of `{headline, source, date, direction, one-line reason}`, plus a top-level `degraded: bool` (true if a search/fetch call failed or returned nothing new since the last run).
+
+**Evening only.** The agent searches (Tavily) on the 16:00 ET cycle only, which halves search credits. On the 04:00 cycle it makes no search and no model call: its slot is the latest *searched* News output for that commodity from an earlier run (at most 4 days back, so Friday evening covers Monday morning), marked `carried_forward: true` with its `source_run_id`. If there's none, the slot is empty and `degraded`. The coordinator still gets four outputs, so the run shape stays fixed, and it's told a carried output wasn't refreshed. Overnight news is picked up by the next evening search, not by 04:00. **Scoring:** a carried output is the same evidence as its source run, so the per-analyst scorecard grades News once per `source_run_id`, never again on the carrying run.
 
 ## Weather / season analyst
 
@@ -294,7 +296,7 @@ No tool in this pipeline places orders with a broker. The portfolio manager prop
 - **The book is invisible upstream.** Analysts and coordinators never see positions or P&L; only the portfolio manager does.
 - **Structured output only** for the scored pipeline. Free-form text can't be scored or compared cycle over cycle; every agent returns fixed fields. (The read-only chat interface is a deliberate, separate exception — see Chat interface.)
 - **Everything logged**, keyed by `run_id` and `cycle_id`: prompts, tool calls, tool results, outputs, raw and post-guardrail manager proposals, violations, and fills, so any run can be replayed or audited.
-- **Fixed run shape.** Same four analysts, same commodity universe, same single 1-week-horizon call, same single portfolio stage, every scheduled cycle — comparability across cycles matters more than adaptive depth, since the auditor's per-analyst scorecard depends on it. No adaptive fanout, no coordinator-to-analyst follow-up calls.
+- **Fixed run shape.** Same four analysts, same commodity universe, same single 1-week-horizon call, same single portfolio stage, every scheduled cycle — comparability across cycles matters more than adaptive depth, since the auditor's per-analyst scorecard depends on it. No adaptive fanout, no coordinator-to-analyst follow-up calls. The one fixed exception is time-of-day, not adaptive: News searches on the 16:00 cycle and is carried forward at 04:00 (see News analyst).
 - **One writer to the official record.** Only scheduled cycles on AWS write official runs; only the portfolio stage writes the paper book. Local runs are unofficial and never sync up.
 - **Degraded-input handling.** Every analyst flags `degraded: true` when its primary source hasn't updated since its last run, or a tool call failed/timed out. The analyst still emits a best-effort structured output — a degraded input is surfaced, not used as a reason to skip the run.
 - **Bounded cost.** Hard cap of 5 tool calls per agent per run, exposed as an env variable for quick tuning. A run that hits the cap fails loudly and is logged as incomplete, not silently truncated.

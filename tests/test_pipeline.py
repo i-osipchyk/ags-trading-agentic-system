@@ -356,3 +356,99 @@ def test_run_pipeline_gives_the_coordinator_its_past_calls_but_not_the_current_r
     [runs] = [json.loads(r["content"])["runs"] for r in tool_results]
     assert [r["run_id"] for r in runs] == [past_id]
     assert [a["checkpoint_weeks"] for a in runs[0]["audits"]] == [1]
+
+
+# --- News: Tavily on the evening cycle only; the morning cycle carries it forward -------------
+
+EVENING = datetime(2026, 6, 4, 16, 0, tzinfo=ET)  # Thu 16:00 ET
+MORNING = datetime(2026, 6, 5, 4, 0, tzinfo=ET)  # Fri 04:00 ET, the next cycle
+
+
+class CountingNewsClient:
+    def __init__(self):
+        self.searches = 0
+
+    def search(self, query, *, published_before):
+        self.searches += 1
+        return []
+
+
+def _cycle(tmp_path, when, chat_client=None, news_client=None):
+    return run_pipeline(
+        commodity="corn", as_of=when, trigger_timestamp=when, chat_client=chat_client or RoutingChatClient(),
+        model="stub-model", log_dir=tmp_path / "logs", data_dir=tmp_path / "data",
+        prices_client=FailingPricesClient(), news_client=news_client or EmptyNewsClient(),
+    )
+
+
+def _replies_with_headline(headline):
+    replies = dict(_CANNED)
+    replies["News analyst"] = {"headlines": [{"headline": headline, "direction": "bullish"}]}
+    return replies
+
+
+def test_fetches_news_only_from_noon_et():
+    from ags.agents.news import fetches_news
+
+    assert fetches_news(EVENING)
+    assert not fetches_news(MORNING)
+    assert fetches_news(datetime(2026, 6, 5, 20, 0, tzinfo=timezone.utc))  # 16:00 EDT given in UTC
+
+
+def test_morning_cycle_carries_the_evening_news_without_searching_or_calling_the_model(tmp_path):
+    evening = _cycle(tmp_path, EVENING, RoutingChatClient(_replies_with_headline("Corn rallies")))
+    chat, news = RoutingChatClient(), CountingNewsClient()
+
+    morning = _cycle(tmp_path, MORNING, chat, news)
+
+    assert morning["outputs"]["news"] == {
+        "headlines": [{"headline": "Corn rallies", "direction": "bullish"}],
+        "degraded": False,
+        "carried_forward": True,
+        "source_run_id": evening["run_id"],
+    }
+    assert news.searches == 0
+    assert not any("News analyst" in messages[0]["content"] for messages in chat.calls)
+    # The coordinator sees it like any other analyst output, flagged as carried.
+    coordinator_prompt = next(m for m in chat.calls if "Coordinator" in m[0]["content"])
+    assert '"carried_forward": true' in coordinator_prompt[1]["content"]
+    logged = [e for e in _events(tmp_path, morning["run_id"]) if e["agent"] == "news"]
+    assert [e["event_type"] for e in logged] == ["output"]
+
+
+def test_a_carried_output_points_at_the_run_that_searched_not_at_another_carry(tmp_path):
+    evening = _cycle(tmp_path, EVENING, RoutingChatClient(_replies_with_headline("Corn rallies")))
+    _cycle(tmp_path, MORNING)
+
+    # Off-schedule morning run an hour later: the newest log is a carry, so it is skipped.
+    again = _cycle(tmp_path, MORNING + timedelta(hours=1))
+
+    assert again["outputs"]["news"]["source_run_id"] == evening["run_id"]
+
+
+def test_morning_cycle_never_carries_news_from_after_its_as_of(tmp_path):
+    later = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
+    _cycle(tmp_path, later, RoutingChatClient(_replies_with_headline("From the future")))
+
+    morning = _cycle(tmp_path, MORNING)
+
+    assert morning["outputs"]["news"] == {
+        "headlines": [], "degraded": True, "carried_forward": True, "source_run_id": None,
+    }
+
+
+def test_monday_morning_carries_friday_evening_across_the_weekend(tmp_path):
+    friday = _cycle(tmp_path, datetime(2026, 6, 5, 16, 0, tzinfo=ET), RoutingChatClient(_replies_with_headline("Friday news")))
+
+    monday = _cycle(tmp_path, datetime(2026, 6, 8, 4, 0, tzinfo=ET))
+
+    assert monday["outputs"]["news"]["source_run_id"] == friday["run_id"]
+
+
+def test_morning_cycle_with_no_recent_evening_run_is_degraded_and_empty(tmp_path):
+    _cycle(tmp_path, EVENING - timedelta(days=5), RoutingChatClient(_replies_with_headline("Old news")))
+
+    morning = _cycle(tmp_path, MORNING)
+
+    assert morning["outputs"]["news"]["source_run_id"] is None
+    assert morning["outputs"]["news"]["degraded"] is True

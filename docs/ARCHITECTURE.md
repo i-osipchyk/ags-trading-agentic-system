@@ -314,7 +314,7 @@ past calls against how they graded out, and adjust emphasis accordingly
 | --- | --- | --- |
 | DeepSeek V4.1 Flash | All agents (model) | OpenAI-compatible API, hand-rolled loop |
 | cTrader Open API | `get_prices` | Official Spotware Python SDK (Twisted-based), wrapped with `crochet` to expose an asyncio-facing interface; credentials via env vars the user provides |
-| Tavily | News analyst search | LLM-shaped search API; free tier (1,000 credits/mo) comfortably covers worst-case usage (~140-280 credits/mo across the full commodity universe) |
+| Tavily | News analyst search | LLM-shaped search API; free tier (1,000 credits/mo). Searched on the 16:00 ET cycle only (the 04:00 cycle carries the output forward, `agents/news.py`): worst case 7 commodities × 5 tool calls × ~22 weekdays ≈ 770 credits/mo, vs ≈ 1,540 if both cycles searched |
 | USDA ESMIS archive | WASDE, Crop Progress, Export Sales | Scrape/parse the dated release archive directly — **not** PSD Online or NASS Quick Stats, both of which return latest-revised values rather than as-published figures |
 | UNICA / Conab / ISO | Sugar & Brazilian crop supply | Scrape/parse each body's public release archive into the PIT store, same pattern as ESMIS |
 | ICO / ICCO / ICAC | Coffee / cocoa / cotton supply-demand | Same scrape/parse pattern; built lazily, one per commodity, only when that commodity is actually worked on |
