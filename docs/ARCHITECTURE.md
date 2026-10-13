@@ -353,13 +353,13 @@ to matter.
   mid-run partway through the four analysts.
 - **v3, in Lambda:** the same `Config`, built from `os.environ` after
   `config.load_env()` copies the SSM SecureStrings under `/ags/<env>/` (and
-  the shared `/platform/shared/` Langfuse keys) into the environment,
+  the shared `/platform/shared/` keys: Langfuse and the cTrader pair) into the environment,
   kebab-case → UPPER_SNAKE (`/ags/live/deepseek-api-key` →
   `DEEPSEEK_API_KEY`; platform conventions § Secrets). Loaded at cold start
-  and re-read on every invocation, so a token rotated by `token_refresh` is
-  picked up by warm containers. Values are pushed by
+  and re-read on every invocation, so a cTrader token the platform rotated is
+  picked up by warm containers. Project values are pushed by
   `scripts/put_secrets.py` from `.env`, never by Terraform. New keys:
-  `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CTRADER_REFRESH_TOKEN`.
+  `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
   Non-secret settings (guardrail limits, risk budget, starting equity,
   stop-out level, per-source release times, storage bucket) are plain env
   vars set by Terraform.
@@ -385,11 +385,10 @@ EventBridge Scheduler  cron(0 4,16 ? * MON-FRI *)  tz America/New_York
        └─ Lambda portfolio(cycle_id, commodity results)
 Scheduler (weekdays 17:00 ET) → Lambda digest
 Scheduler (weekdays 18:00 ET) → Lambda auditor
-Scheduler (daily)             → Lambda token-refresh
 CloudWatch alarms (execution failed, Lambda errors) → SNS platform-alarms → Telegram
 ```
 
-- **One container image** (ECR repo `ags`, arm64, pinned by digest), all five Lambdas, different handler
+- **One container image** (ECR repo `ags`, arm64, pinned by digest), all four Lambdas, different handler
   per function. Built from the same `src/ags` package with the UI dependency
   group excluded (Streamlit moves to a `ui` dependency group; uv's
   `default-groups` keeps local `uv sync` unchanged). Zip packaging was
@@ -484,14 +483,19 @@ CloudWatch alarms (execution failed, Lambda errors) → SNS platform-alarms → 
 - Each violation: `{rule, symbol | null, proposed, applied, detail}`.
 - The shadow sizer's output goes through the same function.
 
-## cTrader token refresh (v3)
+## cTrader credentials (v3)
 
-Unattended runs need it: cTrader Open API access tokens expire (~30 days).
-`token_refresh` runs daily, refreshes when the token is within 7 days of
-expiry, and writes the new refresh token, access token and expiry back to
-their SSM parameters under `/ags/<env>/` (the function role has
-`PutParameter` there, platform `ssm_write`). Failure alerts on Telegram.
-Lambdas re-read SSM per invocation, and once more on an auth error.
+cTrader Open API access tokens expire (~30 days), and a refresh spends the
+old refresh token, so the AWS account holds **one** shared pair under
+`/platform/shared/ctrader-*` with one writer: the platform's
+`platform-ctrader-token-refresh` (daily, refreshes within 7 days of expiry,
+alarms to `platform-alarms`). This project never refreshes and keeps no copy
+of its own — only `/ags/<env>/ctrader-account-id` is per project, and it
+has no SSM write permission (platform conventions § Secrets). Lambdas re-read
+SSM per invocation, and once more on an auth error; if a stale
+`/ags/<env>/ctrader-*` copy exists, the shared value wins. Local runs read
+the shared pair with the developer's AWS credentials for any `CTRADER_*` key
+`.env` leaves unset.
 
 ## Notifications (v3)
 
@@ -501,7 +505,7 @@ Lambdas re-read SSM per invocation, and once more on an auth error.
   errors) go to the shared `platform-alarms` SNS topic, whose notifier posts
   to Telegram — there is no ags-specific alarm forwarder. Direct alerts come
   from the portfolio Lambda (commodity failed two cycles running, breaker
-  tripped) and `token_refresh` (refresh failed).
+  tripped). A failed cTrader token refresh alarms from the platform.
 - **Digest:** the `digest` Lambda reads the last 24 h of cycle files and run
   logs from S3. LLM spend is summed from the per-call `usage.cost_usd` that
   llmkit priced and the LLM layer records in run logs (by agent, by

@@ -1,7 +1,7 @@
 """Lambda entry-point plumbing shared by every handler module.
 
-A fresh Runtime per invocation: the SSM secrets are re-read (so a token refreshed while this
-container was warm is picked up) and the cTrader connection is never left stale between
+A fresh Runtime per invocation: the SSM secrets are re-read (so a cTrader token the platform rotated while
+this container was warm is picked up) and the cTrader connection is never left stale between
 invocations. llmkit is flushed after every invocation.
 """
 
@@ -86,21 +86,3 @@ def digest_handler(event, context):
         aws_cost=prior_day_aws_cost(boto3.client("ce", region_name="us-east-1"), now=now), now=now,
     )
 
-
-def token_refresh_handler(event, context):
-    from datetime import datetime, timezone
-
-    import boto3
-    import requests
-
-    from ags.ctrader_tokens import SsmSecretStore
-    from ags.handlers import token_refresh
-
-    def token_endpoint(params: dict) -> dict:
-        return requests.get("https://openapi.ctrader.com/apps/token", params=params, timeout=30).json()
-
-    store = SsmSecretStore(boto3.client("ssm"), os.environ["SECRETS_PATH"])
-    telegram = _telegram(_config())
-    return token_refresh.handle(
-        event, secret_store=store, token_endpoint=token_endpoint, alert=telegram.send, now=datetime.now(timezone.utc)
-    )

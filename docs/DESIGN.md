@@ -246,7 +246,7 @@ The manager's value is **manager P&L − shadow P&L**. Both books trade the same
 
 Telegram, one chat:
 
-- **Alerts (immediate):** cycle execution failed; a commodity failed two cycles in a row; drawdown breaker tripped; cTrader token refresh failed; Lambda error alarms.
+- **Alerts (immediate):** cycle execution failed; a commodity failed two cycles in a row; drawdown breaker tripped; cTrader token refresh failed (platform alarm); Lambda error alarms.
 - **Daily digest (17:00 ET, weekdays):**
   1. **Spend** — LLM cost for the last 24 h and month-to-date, by agent and by commodity; AWS cost from Cost Explorer (labeled as the prior day, since it lags).
   2. **Book** — equity, day change, drawdown from peak, open positions in lots, margin used.

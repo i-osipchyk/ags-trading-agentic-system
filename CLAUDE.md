@@ -126,11 +126,15 @@ ags-specific parts are here.
   complete unbound. Run logs remain the audit trail; llmkit adds usage and cost
   (`usage.cost_usd` in the run log comes from it — don't add a second price table).
 - **Secrets:** SSM SecureStrings at `/ags/<env>/<kebab-name>`, pushed with
-  `uv run python scripts/put_secrets.py --env live` (`--include-tokens` to re-seed the cTrader
-  tokens, which `token-refresh` rotates itself). `config.load_env()` loads them; never put
+  `uv run python scripts/put_secrets.py --env live`. `config.load_env()` loads them; never put
   values in Terraform.
 - **One env, `live`** — a deliberate deviation from the platform's default `demo,live`: this is
   a paper forward test with no real money to stage for, and a second deployed env would be a
+- **cTrader:** client id/secret and tokens are the account's shared pair in
+  `/platform/shared/ctrader-*`, refreshed only by the platform's `platform-ctrader-token-refresh`.
+  This project never refreshes or stores its own copy; only `ctrader-account-id` is under
+  `/ags/<env>/`. Lambdas re-read SSM every invocation (and retry once on an auth error); local
+  runs read the shared pair with your AWS credentials when `.env` leaves the keys unset.
   second official record and double the LLM spend. AWS names are `ags-live-<name>`.
 
 ## Deployment

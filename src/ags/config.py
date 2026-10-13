@@ -5,10 +5,16 @@ On Lambda: SSM parameters under SECRETS_PATH (/ags/<env>) and SHARED_SECRETS_PAT
 (/platform/shared) are copied into os.environ, kebab-case name -> UPPER_SNAKE, e.g.
 /ags/live/deepseek-api-key -> DEEPSEEK_API_KEY (platform docs/conventions.md § Secrets).
 
+The cTrader client id/secret and tokens are the account's one shared pair under
+/platform/shared/ctrader-*, rotated only by the platform's token refresher; this project never
+refreshes or keeps its own copy. Only CTRADER_ACCOUNT_ID is per project. Locally, any CTRADER_*
+key not in .env is read from the same shared parameters with your AWS credentials.
+
 AWS_REGION is always set afterwards: from the environment / .env (Lambda sets it itself), else
 DEFAULT_AWS_REGION. AWS_DEFAULT_REGION mirrors it, so every boto3 client agrees.
 """
 
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -17,13 +23,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 DEFAULT_AWS_REGION = "eu-west-1"
+DEFAULT_SHARED_SECRETS_PATH = "/platform/shared"
+SHARED_CTRADER_KEYS = ("CTRADER_CLIENT_ID", "CTRADER_CLIENT_SECRET", "CTRADER_ACCESS_TOKEN")
+
+logger = logging.getLogger(__name__)
 
 
 def load_env(dotenv_path: str | Path | None = None, *, refresh: bool = False) -> None:
     """Load .env locally, or the SSM parameters on Lambda.
 
     `refresh=True` re-reads SSM and overwrites what an earlier load put in os.environ: a warm
-    container must see a cTrader token that token_refresh rotated after its cold start.
+    container must see a cTrader token the platform rotated after its cold start.
     """
     on_lambda = bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
     if not on_lambda:
@@ -32,18 +42,40 @@ def load_env(dotenv_path: str | Path | None = None, *, refresh: bool = False) ->
     os.environ.setdefault("AWS_DEFAULT_REGION", os.environ["AWS_REGION"])
     if on_lambda:
         _load_ssm(overwrite=refresh)
+    elif any(not os.getenv(key) for key in SHARED_CTRADER_KEYS):
+        _load_shared_ctrader()
 
 
 def _load_ssm(*, overwrite: bool) -> None:
     import boto3
 
     ssm = boto3.client("ssm")
-    for path in filter(None, (os.getenv("SHARED_SECRETS_PATH"), os.getenv("SECRETS_PATH"))):
-        for key, value in read_parameters(ssm, path).items():
-            if overwrite:
-                os.environ[key] = value
-            else:
-                os.environ.setdefault(key, value)
+    values: dict[str, str] = {}
+    # Shared last, so it wins: a leftover /ags/<env>/ctrader-* copy is stale by definition.
+    for path in filter(None, (os.getenv("SECRETS_PATH"), os.getenv("SHARED_SECRETS_PATH"))):
+        values.update(read_parameters(ssm, path))
+    for key, value in values.items():
+        if overwrite:
+            os.environ[key] = value
+        else:
+            os.environ.setdefault(key, value)
+
+
+def _load_shared_ctrader() -> None:
+    """Fill the CTRADER_* keys .env leaves unset from /platform/shared, with local AWS credentials."""
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    path = os.getenv("SHARED_SECRETS_PATH") or DEFAULT_SHARED_SECRETS_PATH
+    try:
+        shared = read_parameters(boto3.client("ssm"), path)
+    except (BotoCoreError, ClientError) as exc:
+        # Config then names the missing keys; scripts that don't need cTrader carry on.
+        logger.warning("could not read cTrader credentials from SSM %s: %s", path, exc)
+        return
+    for key in SHARED_CTRADER_KEYS:
+        if key in shared:
+            os.environ.setdefault(key, shared[key])
 
 
 def read_parameters(ssm, path: str) -> dict[str, str]:
@@ -96,7 +128,6 @@ class Config:
     tavily_api_key: str
     max_tool_calls: int
     chart_lookback_candles: int
-    ctrader_refresh_token: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
@@ -124,7 +155,6 @@ class Config:
             chart_lookback_candles=int(
                 env.get("CHART_LOOKBACK_CANDLES") or _DEFAULT_CHART_LOOKBACK_CANDLES
             ),
-            ctrader_refresh_token=env.get("CTRADER_REFRESH_TOKEN") or "",
             telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN") or "",
             telegram_chat_id=env.get("TELEGRAM_CHAT_ID") or "",
         )

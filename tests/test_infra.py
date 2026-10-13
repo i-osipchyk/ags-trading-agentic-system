@@ -97,15 +97,16 @@ def test_only_live_is_deployed():
 
 @pytest.mark.parametrize("name,module_path", [
     ("commodity-pipeline", "commodity_pipeline"), ("portfolio", "portfolio"), ("auditor", "auditor"),
-    ("digest", "digest"), ("token-refresh", "token_refresh"),
+    ("digest", "digest"),
 ])
 def test_each_function_runs_its_own_handler_from_the_one_image(name, module_path):
     assert f'handler = "ags.handlers.{module_path}.handler"' in _function(name)
 
 
-def test_exactly_the_five_functions_and_no_alarm_forwarder():
+def test_exactly_the_four_functions_and_no_alarm_forwarder_or_token_refresher():
+    # The cTrader tokens are the shared pair the platform refreshes (conventions.md § Secrets).
     functions = re.findall(r"^\s*([a-z-]+)\s*=\s*\{", _block(_module("app"), r"functions\s*="), re.M)
-    assert sorted(functions) == ["auditor", "commodity-pipeline", "digest", "portfolio", "token-refresh"]
+    assert sorted(functions) == ["auditor", "commodity-pipeline", "digest", "portfolio"]
 
 
 def test_lambda_timeouts_match_the_architecture():
@@ -123,7 +124,6 @@ def test_no_reserved_concurrency_while_the_account_limit_is_10():
 @pytest.mark.parametrize("name,cron", [
     ("digest", "cron(0 17 ? * MON-FRI *)"),
     ("auditor", "cron(0 18 ? * MON-FRI *)"),
-    ("token-refresh", "cron(0 3 * * ? *)"),
 ])
 def test_function_schedules_run_in_new_york_time(name, cron):
     line = re.search(rf"^\s*{re.escape(name)}\s*=\s*\{{(.*)\}}\s*$", _block(_module("app"), r"schedules\s*="), re.M)
@@ -189,7 +189,8 @@ def test_failed_cycles_alarm_to_the_shared_platform_topic():
 def test_secret_values_are_never_managed_by_terraform():
     assert "SecureString" not in MAIN
     assert "aws_secretsmanager" not in MAIN
-    assert "ssm_write         = true" in _module("app")  # token-refresh rotates them itself
+    # Only the platform writes the shared cTrader tokens; this project writes no SSM at all.
+    assert not re.search(r"^\s*ssm_write\s*=", _module("app"), re.M)
 
 
 CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text()

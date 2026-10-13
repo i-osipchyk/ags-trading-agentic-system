@@ -322,8 +322,8 @@ effective-count weights on a fixture of ten overlapping calls.
 
 ## Stage 27 — Lambda handlers + container image
 
-`handlers/` — `commodity_pipeline`, `portfolio`, `auditor`, `digest`,
-`token_refresh` — thin wrappers that build `Config` from the environment
+`handlers/` — `commodity_pipeline`, `portfolio`, `auditor`, `digest` —
+thin wrappers that build `Config` from the environment
 (`config.load_env()`: SSM `/ags/<env>/*` on Lambda) and `S3Storage` from
 env, then call existing functions. Every LLM call goes through llmkit with
 the agent as `component` (`llm/client.py`); handlers flush it after each
@@ -337,19 +337,18 @@ commodity passed through as `null`). Build the image and invoke
 `commodity_pipeline` locally via the Lambda Runtime Interface Emulator
 against `moto`/`LocalStorage`.
 
-## Stage 28 — cTrader token refresh
+## Stage 28 — cTrader token refresh (superseded: now on the platform)
 
-`token_refresh` handler: refresh when within 7 days of expiry, write tokens
-back to their SSM parameters; clients re-read SSM once on an auth error.
-
-**Test:** unit tests with a fake token endpoint and fake secret store
-(refresh, no-op, failure → alert). Manual check against the real endpoint
-once deployed.
+Originally an ags `token_refresh` Lambda. Replaced by the account's shared
+pair in `/platform/shared/ctrader-*`, refreshed by the platform's
+`platform-ctrader-token-refresh` (platform conventions § Secrets). What
+stays here: Lambdas re-read SSM per invocation and once more on an auth
+error, and the shared value wins over any stale `/ags/<env>/` copy.
 
 ## Stage 29 — Telegram alerts + digest (`notify/`)
 
 Telegram client, alert functions (commodity failed twice in a row, breaker
-tripped, token refresh failed; cycle failed and Lambda errors arrive through
+tripped; token refresh failed, cycle failed and Lambda errors arrive through
 the shared `platform-alarms` topic), and the 17:00 digest: spend (LLM by
 agent/commodity from llmkit's per-call cost in the run logs, 24 h + MTD; AWS
 from Cost Explorer, prior day), book, manager vs shadow, latest calls.
@@ -366,8 +365,8 @@ bucket, GitHub OIDC, the `gh-deploy-ags` role, the `ags` ECR repo and the
 repo.
 
 - `infra/`: the platform `data-bucket` and `lambda-app` modules (pinned to a
-  platform tag) for the bucket, the five Lambdas, their role, log groups,
-  schedules (digest 17:00, auditor 18:00, token refresh daily — all
+  platform tag) for the bucket, the four Lambdas, their role, log groups,
+  schedules (digest 17:00, auditor 18:00, both
   `America/New_York`) and Errors alarms; next to them, Step Functions
   `ags-<env>-cycle` (Map ×7 with retry/catch → portfolio) with its log group,
   the cycle schedule `cron(0 4,16 ? * MON-FRI *)` and its own scheduler role,
