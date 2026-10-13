@@ -146,3 +146,10 @@ def test_missing_required_parameter_raises(on_lambda):
 
     with pytest.raises(ConfigError, match="TAVILY_API_KEY"):
         Config.from_env()
+
+
+def test_local_blank_dotenv_ctrader_values_are_filled_from_ssm(local, monkeypatch):
+    monkeypatch.setenv("CTRADER_ACCESS_TOKEN", "")
+    load_env(local)
+
+    assert os.environ["CTRADER_ACCESS_TOKEN"] == "access"
