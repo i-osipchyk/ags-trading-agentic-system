@@ -121,7 +121,9 @@ resource "aws_scheduler_schedule" "cycle" {
   target {
     arn      = aws_sfn_state_machine.cycle.arn
     role_arn = aws_iam_role.cycle_scheduler.arn
-    input    = jsonencode({ scheduled_time = "<aws.scheduler.scheduled-time>", off_schedule = false })
+    # A literal string, not jsonencode(): jsonencode escapes < and > to \u003c / \u003e, Scheduler
+    # then doesn't recognise the placeholder, and the state machine gets it verbatim.
+    input = "{\"scheduled_time\": \"<aws.scheduler.scheduled-time>\", \"off_schedule\": false}"
 
     # Retries of the StartExecution call only. A cycle that still starts > 1 h late aborts itself.
     retry_policy {

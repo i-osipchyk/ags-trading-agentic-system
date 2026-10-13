@@ -137,7 +137,12 @@ def test_cycle_schedule_starts_the_state_machine_twice_each_weekday_in_new_york_
     assert 'schedule_expression          = "cron(0 4,16 ? * MON-FRI *)"' in body
     assert 'schedule_expression_timezone = "America/New_York"' in body
     assert "arn      = aws_sfn_state_machine.cycle.arn" in body
-    assert "<aws.scheduler.scheduled-time>" in body
+    # The placeholder must reach Scheduler unescaped: jsonencode() would turn <> into \u003c\u003e.
+    target_input = re.search(r'^\s*input\s*=\s*(.+)$', body, re.M).group(1)
+    assert "jsonencode" not in target_input
+    assert json.loads(json.loads(target_input)) == {
+        "scheduled_time": "<aws.scheduler.scheduled-time>", "off_schedule": False,
+    }
     # In the module's group (the deploy role manages schedules only there) and under the same switch.
     assert "group_name                   = local.name" in body
     assert "var.schedules_enabled" in body
