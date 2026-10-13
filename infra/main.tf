@@ -1,4 +1,4 @@
-# The data bucket and the six Lambdas, on the platform modules (platform docs/conventions.md).
+# The data bucket and the four Lambdas, on the platform modules (platform docs/conventions.md).
 # Step Functions, the cycle schedule and the breaker parameter sit next to them in cycle.tf.
 
 locals {
@@ -31,15 +31,13 @@ module "app" {
     portfolio          = { handler = "ags.handlers.portfolio.handler", timeout = 300, memory = 1024 }
     auditor            = { handler = "ags.handlers.auditor.handler", timeout = 900, memory = 1024 }
     digest             = { handler = "ags.handlers.digest.handler", timeout = 120, memory = 512 }
-    token-refresh      = { handler = "ags.handlers.token_refresh.handler", timeout = 60, memory = 256 }
   }
 
   # America/New_York regardless of the deployment region. The twice-daily cycle starts the state
   # machine, which the module's scheduler role can't, so it lives in cycle.tf.
   schedules = {
-    digest        = { function = "digest", expression = "cron(0 17 ? * MON-FRI *)", timezone = "America/New_York" }
-    auditor       = { function = "auditor", expression = "cron(0 18 ? * MON-FRI *)", timezone = "America/New_York" }
-    token-refresh = { function = "token-refresh", expression = "cron(0 3 * * ? *)", timezone = "America/New_York" }
+    digest  = { function = "digest", expression = "cron(0 17 ? * MON-FRI *)", timezone = "America/New_York" }
+    auditor = { function = "auditor", expression = "cron(0 18 ? * MON-FRI *)", timezone = "America/New_York" }
   }
   schedules_enabled = var.schedules_enabled
 
@@ -48,7 +46,8 @@ module "app" {
     AGS_BREAKER_PARAM = aws_ssm_parameter.breaker_reset_at.name
   })
   write_bucket_arns = [module.data.arn]
-  ssm_write         = true # token-refresh rotates the cTrader tokens under /ags/<env>/
+  # No ssm_write: the cTrader tokens are the shared /platform/shared/ctrader-* pair, which only
+  # the platform's platform-ctrader-token-refresh writes (platform docs/conventions.md § Secrets).
 
   extra_policy_json = data.aws_iam_policy_document.functions_extra.json
 }

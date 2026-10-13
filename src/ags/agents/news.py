@@ -1,7 +1,10 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
+from ags.storage import Storage, as_storage
+from ags.tools.pit_store import ET
 from ags.tools.sources.news import NewsClient
 from ags.tools.sources.news import fetch_document as fetch_document_pit
 from ags.tools.sources.news import search_news as fetch_search_news
@@ -21,6 +24,53 @@ Respond with a JSON object containing exactly this field:
     "direction": "bullish" | "bearish" | "neutral"
     "reason": one-line reason for that direction call
 No other text — JSON only."""
+
+# Tavily is searched only on the evening cycle (16:00 ET); the 04:00 cycle carries that output
+# forward, which halves search credits. Any run at or after noon ET counts as evening.
+NEWS_FETCH_FROM_HOUR_ET = 12
+# Friday 16:00 -> Monday 04:00 is 60 h; older than this, the slot is left empty and degraded.
+MAX_CARRY_AGE = timedelta(days=4)
+
+
+def fetches_news(as_of: datetime) -> bool:
+    return as_of.astimezone(ET).hour >= NEWS_FETCH_FROM_HOUR_ET
+
+
+def carry_forward_news(log_dir: Storage | Path, *, commodity: str, before: datetime) -> dict:
+    """The newest fetched News output for `commodity` from a run triggered before `before`.
+
+    `before` bounds the search so the result is point-in-time safe. Carried outputs are never
+    carried again: each one points at the run that actually searched, via `source_run_id`.
+    """
+    log_store = as_storage(log_dir)
+    for key in reversed(log_store.list(f"{commodity}_")):
+        if "/" in key or not key.endswith(".jsonl"):
+            continue
+        run_id = key.removesuffix(".jsonl")
+        triggered = datetime.strptime(run_id.removeprefix(f"{commodity}_"), "%Y-%m-%dT%H-%M-%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        if triggered >= before:
+            continue
+        if before - triggered > MAX_CARRY_AGE:
+            break
+        output = _news_output(log_store, key)
+        if output is not None and not output.get("carried_forward"):
+            return {
+                "headlines": output.get("headlines", []),
+                "degraded": bool(output.get("degraded")),
+                "carried_forward": True,
+                "source_run_id": run_id,
+            }
+    return {"headlines": [], "degraded": True, "carried_forward": True, "source_run_id": None}
+
+
+def _news_output(log_store: Storage, key: str) -> dict | None:
+    for line in reversed(log_store.get(key).decode().splitlines()):
+        event = json.loads(line)
+        if event["agent"] == "news" and event["event_type"] == "output":
+            return event["payload"]
+    return None
 
 
 def run_news_analyst(

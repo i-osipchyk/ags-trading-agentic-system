@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from ags.agents.coordinator import run_coordinator
-from ags.agents.news import run_news_analyst
+from ags.agents.news import carry_forward_news, fetches_news, run_news_analyst
 from ags.agents.supply_demand import run_supply_demand_analyst
 from ags.agents.technical import run_technical_analyst
 from ags.agents.weather import run_weather_analyst
@@ -135,7 +135,12 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
         "technical": lambda: run_technical_analyst(
             data_dir, _client("technical"), prices_client=prices_client, **common
         ),
-        "news": lambda: run_news_analyst(data_dir, _client("news"), news_client=news_client, **common),
+        "news": (
+            (lambda: run_news_analyst(data_dir, _client("news"), news_client=news_client, **common))
+            if fetches_news(as_of)
+            # Bounded by both: a local run's trigger is wall-clock time, which can be after as_of.
+            else lambda: carry_forward_news(log_dir, commodity=commodity, before=min(as_of, trigger_timestamp))
+        ),
         "weather": lambda: run_weather_analyst(
             data_dir, _client("weather"), weather_client=weather_client, **common
         ),

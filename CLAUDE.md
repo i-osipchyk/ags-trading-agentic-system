@@ -25,7 +25,9 @@ sources, logging format, AWS deployment, and everything else *how*-shaped):
 Per commodity, every cycle:
 
 - **Technical analyst** — trend, volatility, seasonality alignment
-- **News analyst** — recent headlines, deduped, no commentary
+- **News analyst** — recent headlines, deduped, no commentary. Searches (Tavily) on
+  the 16:00 ET cycle only; at 04:00 it carries the latest searched output forward
+  (`carried_forward`, `source_run_id`), with no search and no model call
 - **Weather/season analyst** — regional conditions + crop growth stage
 - **Supply/demand analyst** — USDA/UNICA/Conab/ISO report data (plus
   ICO/ICCO/ICAC for coffee/cocoa/cotton as needed — see `ARCHITECTURE.md`)
@@ -126,9 +128,13 @@ ags-specific parts are here.
   complete unbound. Run logs remain the audit trail; llmkit adds usage and cost
   (`usage.cost_usd` in the run log comes from it — don't add a second price table).
 - **Secrets:** SSM SecureStrings at `/ags/<env>/<kebab-name>`, pushed with
-  `uv run python scripts/put_secrets.py --env live` (`--include-tokens` to re-seed the cTrader
-  tokens, which `token-refresh` rotates itself). `config.load_env()` loads them; never put
+  `uv run python scripts/put_secrets.py --env live`. `config.load_env()` loads them; never put
   values in Terraform.
+- **cTrader:** client id/secret and tokens are the account's shared pair in
+  `/platform/shared/ctrader-*`, refreshed only by the platform's `platform-ctrader-token-refresh`.
+  This project never refreshes or stores its own copy; only `ctrader-account-id` is under
+  `/ags/<env>/`. Lambdas re-read SSM every invocation (and retry once on an auth error); local
+  runs read the shared pair with your AWS credentials when `.env` leaves the keys unset.
 - **One env, `live`** — a deliberate deviation from the platform's default `demo,live`: this is
   a paper forward test with no real money to stage for, and a second deployed env would be a
   second official record and double the LLM spend. AWS names are `ags-live-<name>`.

@@ -7,9 +7,9 @@ Terraform never holds secret values (they'd land in state). Prints names only, n
 Add a key: list it in SECRETS (or OPTIONAL) and in .env.example. The Lambda sees it as the same
 UPPER_SNAKE env var (config.load_env).
 
-The cTrader tokens are seeded from here once; after that the token-refresh Lambda rotates
-CTRADER_ACCESS_TOKEN / CTRADER_REFRESH_TOKEN in SSM itself, so they are skipped unless
---include-tokens is given (re-seeding after a manual re-authorisation).
+The cTrader client id/secret and tokens are not pushed from here: they're the account's shared
+pair under /platform/shared/ctrader-*, seeded once and rotated by the platform (platform
+docs/conventions.md § Secrets). Only CTRADER_ACCOUNT_ID is per project.
 """
 
 import argparse
@@ -23,8 +23,6 @@ from ags.config import load_env, parameter_name
 
 SECRETS: tuple[str, ...] = (
     "DEEPSEEK_API_KEY",
-    "CTRADER_CLIENT_ID",
-    "CTRADER_CLIENT_SECRET",
     "CTRADER_ACCOUNT_ID",
     "TAVILY_API_KEY",
     "TELEGRAM_BOT_TOKEN",
@@ -32,18 +30,16 @@ SECRETS: tuple[str, ...] = (
 )
 # Non-secret overrides; pushed only when set in .env (otherwise the code's default applies).
 OPTIONAL: tuple[str, ...] = ("DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL", "MAX_TOOL_CALLS", "CHART_LOOKBACK_CANDLES")
-TOKENS: tuple[str, ...] = ("CTRADER_ACCESS_TOKEN", "CTRADER_REFRESH_TOKEN")
 
 
 def main() -> None:
     load_env(Path(__file__).parents[1] / ".env")  # also defaults AWS_REGION to eu-west-1
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", choices=["live"], required=True)
-    parser.add_argument("--include-tokens", action="store_true", help="also (re)seed the cTrader tokens")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    keys = [*SECRETS, *(TOKENS if args.include_tokens else ()), *(k for k in OPTIONAL if os.getenv(k))]
+    keys = [*SECRETS, *(k for k in OPTIONAL if os.getenv(k))]
     missing = [k for k in keys if not os.getenv(k)]
     if missing:
         sys.exit(f"missing in .env: {', '.join(missing)}")
