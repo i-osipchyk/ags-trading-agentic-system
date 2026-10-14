@@ -406,6 +406,14 @@ CloudWatch alarms (execution failed, Lambda errors) → SNS platform-alarms → 
 - **Missing commodity:** the portfolio Lambda receives the Map results; a
   `failed: true` commodity becomes a `null` call → guardrail 9 holds its leg.
   Two consecutive failures for the same commodity alert.
+- **On-demand cycles** (`uv run python scripts/trigger_cycle.py`) create a
+  one-time Scheduler schedule, a couple of minutes ahead, with the `cycle`
+  schedule's target copied verbatim. Scheduler fills in the scheduled-time
+  placeholder, so the run takes exactly the path of a 04:00/16:00 cycle and
+  **is an official cycle**: it writes both books and can alert. Its
+  `scheduled_time` is the fire time, so a run at or after noon ET is an
+  evening (News-searching) cycle. Use it to test the real path; a hand-started
+  execution never exercises Scheduler's substitution.
 - **Off-schedule cycles** (started by hand:
   `aws stepfunctions start-execution` with `off_schedule: true`) run the full
   pipeline and the manager but **do not write either book** — the proposal

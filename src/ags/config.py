@@ -74,8 +74,8 @@ def _load_shared_ctrader() -> None:
         logger.warning("could not read cTrader credentials from SSM %s: %s", path, exc)
         return
     for key in SHARED_CTRADER_KEYS:
-        if key in shared:
-            os.environ.setdefault(key, shared[key])
+        if key in shared and not os.getenv(key):  # a blank `KEY=` line in .env counts as unset
+            os.environ[key] = shared[key]
 
 
 def read_parameters(ssm, path: str) -> dict[str, str]:
