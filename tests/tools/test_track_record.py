@@ -6,8 +6,8 @@ from ags.tools.track_record import read_track_record
 AS_OF = datetime(2026, 6, 5, 18, 30, tzinfo=timezone.utc)
 
 
-def _write_run(log_dir, run_id, **overrides):
-    output = {
+def _write_run(log_dir, run_id, output=None, **overrides):
+    output = output or {
         "call": "bullish",
         "conviction": 4,
         "thesis": f"thesis for {run_id}",
@@ -126,3 +126,15 @@ def test_includes_the_1_day_diagnostic_before_the_weekly_checkpoints(tmp_path):
 
     assert [(a.get("checkpoint_days"), a.get("checkpoint_weeks")) for a in run["audits"]] == [(1, None), (None, 1)]
     assert run["audits"][0]["direction_correct"] is False
+
+
+def test_skips_runs_whose_coordinator_produced_no_call(tmp_path):
+    # Shape the pipeline logs when the coordinator itself fails (e.g. the model API rejects the request).
+    log_dir, audit_dir = _read(tmp_path)
+    _write_run(log_dir, "corn_2026-05-28T18-30-00Z")
+    _write_run(log_dir, "corn_2026-05-29T18-30-00Z", output={"call": None, "degraded": True, "error": "APIStatusError: 402"})
+    _write_run(log_dir, "corn_2026-06-01T18-30-00Z", call=None, conviction=None, degraded=True)
+
+    record = read_track_record(log_dir, audit_dir, commodity="corn", lookback_weeks=8, as_of=AS_OF)
+
+    assert [r["run_id"] for r in record] == ["corn_2026-05-28T18-30-00Z"]
