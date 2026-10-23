@@ -49,7 +49,9 @@ def read_track_record(log_dir: Storage | Path, audit_dir: Storage | Path, *, com
         if not earliest <= triggered < as_of:
             continue
         output = _coordinator_output(log_store, run_id)
-        if output is None:
+        # A failed coordinator logs a degraded output with no call (and possibly none of the
+        # other fields); there is nothing to review, same as the auditor skips it.
+        if output is None or output.get("call") is None:
             continue
         record.append({"run_id": run_id, **{f: output[f] for f in _CALL_FIELDS}, "audits": _audits(audit_store, run_id, as_of)})
     return record

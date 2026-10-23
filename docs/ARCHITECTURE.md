@@ -99,6 +99,9 @@ call (its tool allowlist) — never the tool implementation itself, so the
   `base_url`/model-string change, not a redesign.
 - The 5-tool-call cap, `degraded` flagging, and full prompt/tool-call/result
   logging are guardrails owned by this loop, not delegated to a framework.
+  A tool that raises (or an unknown tool name, or unparseable arguments) is
+  returned to the model as `{"error": "<Type>: <message>"}` and still counts
+  toward the cap, so one bad tool can't degrade the whole agent.
 - **Every model call goes through llmkit** (the `~/dev` platform's tracked
   client, `platform/docs/llm-observability.md`), from one module:
   `llm/client.py`. The root `LLMClient` has no `complete`; it must be
@@ -285,7 +288,9 @@ past calls against how they graded out, and adjust emphasis accordingly
   exist for it (`{checkpoint_weeks, direction_correct, driver_verdicts,
   calibration_note, thesis_vs_outcome}` for each `audits/{run_id}/{weeks}w.json`
   found). No new storage, no write path — a deterministic join over
-  already-logged, already-tested data.
+  already-logged, already-tested data. Runs whose coordinator produced no
+  call (a degraded output, e.g. the model API refused the request) are
+  skipped, as the auditor skips them: there is nothing to review.
 - **No synthetic placeholders.** Missing audit checkpoints are simply
   absent from the response, not filled with null/pending stubs. The
   coordinator's prompt must expect variable-shaped track-record data — one

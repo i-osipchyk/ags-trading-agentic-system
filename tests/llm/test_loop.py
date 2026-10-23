@@ -253,3 +253,37 @@ def test_run_loop_does_not_echo_a_replys_usage_back_to_the_model():
     second_request = client.calls[1]["messages"]
     assert all("usage" not in message for message in second_request)
     assert all("usage" not in message for message in result.messages)
+
+
+def test_run_loop_feeds_a_failing_tool_back_to_the_model_as_an_error():
+    def broken(lookback_weeks):
+        raise KeyError("conviction")
+
+    tool = ToolSpec(
+        name="read_track_record",
+        description="Past calls.",
+        parameters={"type": "object", "properties": {"lookback_weeks": {"type": "integer"}}},
+        function=broken,
+    )
+    client = FakeChatClient(
+        responses=[
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "call_1", "function": {"name": "read_track_record", "arguments": '{"lookback_weeks": 12}'}},
+                    {"id": "call_2", "function": {"name": "no_such_tool", "arguments": "{}"}},
+                    {"id": "call_3", "function": {"name": "read_track_record", "arguments": "not json"}},
+                ],
+            },
+            {"role": "assistant", "content": '{"call": "neutral"}', "tool_calls": None},
+        ]
+    )
+
+    result = run_loop(client, model="m", system_prompt="s", user_prompt="u", tools=[tool])
+
+    assert result.content == '{"call": "neutral"}'
+    errors = [json.loads(m["content"])["error"] for m in result.messages if m["role"] == "tool"]
+    assert errors[0] == "KeyError: 'conviction'"
+    assert errors[1].startswith("KeyError")
+    assert errors[2].startswith("JSONDecodeError")

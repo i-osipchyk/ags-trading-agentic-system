@@ -90,9 +90,15 @@ def run_loop(
             if tool_call_count >= max_tool_calls:
                 result = {"error": "tool_call_cap_hit: no further tool calls executed this run"}
             else:
-                tool = tool_by_name[tool_call["function"]["name"]]
-                arguments = json.loads(tool_call["function"]["arguments"])
-                result = tool.function(**arguments)
+                # A tool that fails (bad stored data, an unknown name or malformed arguments
+                # from the model) is reported back as a result, not raised: the agent can
+                # still answer without it, instead of the whole agent degrading.
+                try:
+                    tool = tool_by_name[tool_call["function"]["name"]]
+                    arguments = json.loads(tool_call["function"]["arguments"])
+                    result = tool.function(**arguments)
+                except Exception as exc:
+                    result = {"error": f"{type(exc).__name__}: {exc}"}
                 tool_call_count += 1
             messages.append(
                 {
