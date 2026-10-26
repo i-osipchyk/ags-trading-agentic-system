@@ -23,3 +23,14 @@ def risk_facts(bars: list[dict], specs: dict, *, atr_period: int = _ATR_PERIOD) 
         "atr_usd_per_lot": atr * units_per_lot,
         "notional_per_lot": bars[-1]["close"] * units_per_lot,
     }
+
+
+def unsized_risk_facts(quote: dict, specs: dict, error: str) -> dict:
+    """Risk facts for a symbol whose ATR couldn't be computed (`error` says why).
+
+    No ATR means nothing can size the leg, so guardrail 9 holds it. Notional comes from the
+    quote mid instead, so a position already held still counts toward the caps.
+    """
+    units_per_lot = specs["lot_size"] / _CTRADER_VOLUME_PER_UNIT
+    mid = (quote["bid"] + quote["ask"]) / 2
+    return {"atr": None, "atr_usd_per_lot": None, "notional_per_lot": mid * units_per_lot, "error": error}

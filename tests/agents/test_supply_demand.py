@@ -120,7 +120,9 @@ def test_run_supply_demand_analyst_surfaces_degraded_true_when_the_model_returns
         usda_client=FakeUsdaClient({"corn": [CORN_SEP]}),
     )
 
-    assert result == {"latest_report": None, "key_figures": [], "stocks_to_use": None, "degraded": True}
+    assert result == {
+        "latest_report": None, "key_figures": [], "stocks_to_use": None, "unparsed_reply": "not valid json", "degraded": True,
+    }
 
 
 COFFEE_JUN = {

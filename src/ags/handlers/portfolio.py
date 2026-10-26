@@ -2,7 +2,7 @@ from datetime import datetime
 
 from ags.handlers.runtime import Runtime, check_late_start, cycle_id_for
 from ags.notify.alerts import breaker_newly_tripped, consecutive_failures
-from ags.portfolio.stage import run_portfolio
+from ags.portfolio.stage import MANAGER_ATTEMPTS, run_portfolio
 
 
 def handle(event: dict, runtime: Runtime) -> dict:
@@ -18,6 +18,11 @@ def handle(event: dict, runtime: Runtime) -> dict:
         breaker_reset_at=runtime.breaker_reset_at, off_schedule=event.get("off_schedule", False),
     )
     if not event.get("off_schedule", False):
+        if cycle["manager"]["manager_error"]:
+            runtime.alert(
+                f"Portfolio manager failed in {cycle_id} after {MANAGER_ATTEMPTS} attempts, every manager leg held: "
+                f"{cycle['manager']['manager_error']}"
+            )
         failing = consecutive_failures(runtime.storage)
         if failing:
             runtime.alert(f"Commodity pipeline failed two cycles running: {', '.join(failing)}")

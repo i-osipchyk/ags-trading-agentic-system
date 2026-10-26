@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from ags.llm.loop import ToolSpec, run_loop
+from ags.llm.loop import ToolSpec, run_json_loop, run_loop
 
 
 class FakeChatClient:
@@ -329,3 +329,92 @@ def test_a_clean_run_has_no_tool_errors():
     client = FakeChatClient(responses=[{"role": "assistant", "content": "{}", "tool_calls": None}])
 
     assert run_loop(client, model="m", system_prompt="s", user_prompt="u", tools=[]).tool_errors == 0
+
+
+def _trend_tool(function):
+    return ToolSpec(name="get_trend", description="d", parameters={"type": "object"}, function=function)
+
+
+def _calls_then_answer(*tool_calls):
+    return [{"role": "assistant", "content": None, "tool_calls": [call]} for call in tool_calls] + [
+        {"role": "assistant", "content": "{}", "tool_calls": None}
+    ]
+
+
+def test_a_failed_call_tells_the_model_to_retry_and_a_good_retry_clears_the_error():
+    client = FakeChatClient(
+        _calls_then_answer(
+            _tool_call("get_trend", '{"ticker": "ZC"}', "c1"),  # wrong argument name
+            _tool_call("get_trend", '{"symbol": "ZC"}', "c2"),
+        )
+    )
+
+    result = run_loop(client, model="m", system_prompt="s", user_prompt="u", tools=[_trend_tool(lambda symbol: {"trend": "up"})])
+
+    first = json.loads(client.calls[1]["messages"][-1]["content"])
+    assert "arguments were wrong" in first["retry"] and "get_trend" in first["retry"]
+    assert result.tool_errors == 0
+
+
+def test_a_tool_that_raises_is_retried_and_counted_only_if_the_retry_also_fails():
+    attempts = []
+
+    def flaky(symbol):
+        attempts.append(symbol)
+        if len(attempts) == 1:
+            raise ConnectionError("source down")
+        return {"trend": "up"}
+
+    recovered = run_loop(
+        FakeChatClient(_calls_then_answer(_tool_call("get_trend", '{"symbol": "ZC"}', "c1"), _tool_call("get_trend", '{"symbol": "ZC"}', "c2"))),
+        model="m", system_prompt="s", user_prompt="u", tools=[_trend_tool(flaky)],
+    )
+
+    def down(symbol):
+        raise ConnectionError("source down")
+
+    client = FakeChatClient(_calls_then_answer(_tool_call("get_trend", '{"symbol": "ZC"}', "c1"), _tool_call("get_trend", '{"symbol": "ZC"}', "c2")))
+    still_down = run_loop(client, model="m", system_prompt="s", user_prompt="u", tools=[_trend_tool(down)])
+
+    assert recovered.tool_errors == 0
+    assert still_down.tool_errors == 2
+    error = json.loads(client.calls[1]["messages"][-1]["content"])
+    assert error["error"] == "ConnectionError: source down"
+    assert "failed while running" in error["retry"]
+
+
+def test_an_unknown_tool_followed_by_a_real_one_has_recovered():
+    client = FakeChatClient(
+        _calls_then_answer(_tool_call("get_rainfall", "{}", "c1"), _tool_call("get_trend", '{"symbol": "ZC"}', "c2"))
+    )
+
+    result = run_loop(client, model="m", system_prompt="s", user_prompt="u", tools=[_trend_tool(lambda symbol: {})])
+
+    assert "available tools" in json.loads(client.calls[1]["messages"][-1]["content"])["retry"]
+    assert result.tool_errors == 0
+
+
+def test_run_json_loop_sends_validation_problems_back_once():
+    client = FakeChatClient(
+        [
+            {"role": "assistant", "content": '{"call": "up"}', "tool_calls": None},
+            {"role": "assistant", "content": '{"call": "bullish"}', "tool_calls": None},
+        ]
+    )
+
+    result = run_json_loop(
+        client, model="m", system_prompt="s", user_prompt="u", tools=[],
+        validate=lambda parsed: [] if parsed["call"] == "bullish" else ["call: must be bullish"],
+    )
+
+    assert result.content == '{"call": "bullish"}'
+    assert "- call: must be bullish" in client.calls[1]["messages"][-1]["content"]
+    assert client.calls[1]["tools"] is None
+
+
+def test_run_json_loop_does_not_retry_a_valid_reply():
+    client = FakeChatClient([{"role": "assistant", "content": "{}", "tool_calls": None}])
+
+    run_json_loop(client, model="m", system_prompt="s", user_prompt="u", tools=[], validate=lambda parsed: [])
+
+    assert len(client.calls) == 1

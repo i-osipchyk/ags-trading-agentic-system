@@ -73,6 +73,8 @@ def apply_guardrails(
         call = calls.get(s)
         if call is None:
             clamp("missing_input", s, current[s], "pipeline failed; leg held as-is")
+        elif "error" in risk[s]:
+            clamp("missing_input", s, current[s], f"risk facts unavailable ({risk[s]['error']}); leg held as-is")
         elif call["call"] == "neutral":
             clamp("direction", s, current[s], "neutral call freezes the leg")
         elif call["call"] == "bullish" and target[s] < 0:

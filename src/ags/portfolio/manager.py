@@ -11,6 +11,7 @@ fills and costs after you. Corn, soybeans and wheat move together; do not treat 
 independent bets. A neutral call freezes its leg: whatever you return for it is ignored.
 
 Risk is comparable across symbols through "atr_usd_per_lot", the dollar value of one ATR move per lot.
+A symbol whose risk facts are null couldn't be measured this cycle: its leg is held too.
 
 Respond with a JSON object containing exactly these fields:
   "legs": one entry per symbol, all seven present, each {{"symbol": ..., "delta_lots": signed number added to the current position, "rationale": short text}}

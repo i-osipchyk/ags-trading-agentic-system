@@ -44,24 +44,17 @@ def run_supply_demand_analyst(
     if usda_client is None:
         usda_client = EsmisClient()
 
+    # Both raise on a source failure: the loop reports it and asks the model to retry. No
+    # release as of the date is a gap the model can't fix.
     def _get_usda_report_tool(report: str) -> dict:
         nonlocal degraded
-        try:
-            result = fetch_usda_report(data_dir, report=report_for_symbol(commodity), symbol=commodity, as_of=as_of, client=usda_client)
-            if result["latest"] is None:
-                degraded = True
-            return result
-        except Exception as exc:
+        result = fetch_usda_report(data_dir, report=report_for_symbol(commodity), symbol=commodity, as_of=as_of, client=usda_client)
+        if result["latest"] is None:
             degraded = True
-            return {"error": str(exc)}
+        return result
 
     def _get_revisions_tool() -> dict:
-        nonlocal degraded
-        try:
-            return fetch_revisions(data_dir, symbol=commodity, as_of=as_of, client=usda_client)
-        except Exception as exc:
-            degraded = True
-            return {"error": str(exc)}
+        return fetch_revisions(data_dir, symbol=commodity, as_of=as_of, client=usda_client)
 
     tools = [
         ToolSpec(
@@ -89,11 +82,12 @@ def run_supply_demand_analyst(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
 
-    parsed, complete = parse_reply(loop_result.content, _REPLY_FIELDS)
+    parsed, complete, unparsed = parse_reply(loop_result.content, _REPLY_FIELDS)
 
     return {
         "latest_report": parsed.get("latest_report"),
         "key_figures": parsed.get("key_figures", []),
         "stocks_to_use": parsed.get("stocks_to_use"),
+        **unparsed,
         "degraded": degraded or not complete or loop_result.tool_errors > 0,
     }

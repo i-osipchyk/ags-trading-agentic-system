@@ -40,16 +40,14 @@ def run_weather_analyst(
     degraded = False
     stage_of_crop_cycle = compute_growing_calendar(commodity, as_of)["stage"]
 
+    # Raises on an unsupported region or a source failure: the loop reports it and asks the
+    # model to retry. A region with no data at all is a gap the model can't fix.
     def _get_weather_tool(region: str) -> dict:
         nonlocal degraded
-        try:
-            result = fetch_weather(data_dir, region=region, as_of=as_of, client=weather_client)
-            if result["drought"] is None and result["outlook"] is None:
-                degraded = True
-            return result
-        except Exception as exc:
+        result = fetch_weather(data_dir, region=region, as_of=as_of, client=weather_client)
+        if result["drought"] is None and result["outlook"] is None:
             degraded = True
-            return {"error": str(exc)}
+        return result
 
     tools = [
         ToolSpec(
@@ -76,12 +74,13 @@ def run_weather_analyst(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
 
-    parsed, complete = parse_reply(loop_result.content, _REPLY_FIELDS)
+    parsed, complete, unparsed = parse_reply(loop_result.content, _REPLY_FIELDS)
 
     return {
         "regions_covered": parsed.get("regions_covered", []),
         "current_conditions": parsed.get("current_conditions", {}),
         "stage_of_crop_cycle": stage_of_crop_cycle,
         "risk_assessment": parsed.get("risk_assessment", {}),
+        **unparsed,
         "degraded": degraded or not complete or loop_result.tool_errors > 0,
     }

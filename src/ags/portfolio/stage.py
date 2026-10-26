@@ -9,13 +9,15 @@ from ags.pipeline import LoggingChatClient
 from ags.portfolio.guardrails import GuardrailConfig, apply_guardrails
 from ags.portfolio.manager import run_portfolio_manager
 from ags.portfolio.paper_book import PaperBook
-from ags.portfolio.risk import risk_facts
+from ags.portfolio.risk import risk_facts, unsized_risk_facts
 from ags.portfolio.shadow import shadow_proposal
 from ags.storage import LocalStorage, Prefixed, Storage
 from ags.tools.sources.prices import CTRADER_SYMBOL_NAMES, get_h1_bars, get_prices, get_quote, get_symbol_specs
 
 COMMODITIES = list(CTRADER_SYMBOL_NAMES)
 _DAILY_LOOKBACK_DAYS = 45
+# The manager call is tried this many times before the cycle holds every manager leg.
+MANAGER_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -129,11 +131,19 @@ def _run_portfolio(
     for c in COMMODITIES:
         specs[c] = get_symbol_specs(data, commodity=c, as_of=as_of, client=market_client, now=now)
         quotes[c] = get_quote(data, commodity=c, as_of=quoted_at, client=market_client, now=now)
-        bars = get_prices(
-            data, commodity=c, start=as_of.date() - timedelta(days=_DAILY_LOOKBACK_DAYS), end=as_of.date(),
-            as_of=as_of, client=market_client, now=now,
-        )
-        risk[c] = risk_facts(bars, specs[c])
+        try:
+            bars = get_prices(
+                data, commodity=c, start=as_of.date() - timedelta(days=_DAILY_LOOKBACK_DAYS), end=as_of.date(),
+                as_of=as_of, client=market_client, now=now,
+            )
+            risk[c] = risk_facts(bars, specs[c])
+        except Exception as exc:
+            # One symbol's daily bars (too few, or a failed fetch) must not take the cycle down:
+            # its leg is held (guardrail 9). Without a quote there is nothing to price it at either.
+            if quotes[c] is None:
+                raise
+            risk[c] = unsized_risk_facts(quotes[c], specs[c], f"{type(exc).__name__}: {exc}")
+    risk_errors = {c: r["error"] for c, r in risk.items() if "error" in r}
 
     results = {}
     for name in ("manager", "shadow"):
@@ -163,18 +173,23 @@ def _run_portfolio(
         book_state = {"equity": snapshot["equity"], "lots": lots}
         manager_error = None
         if name == "manager":
-            try:
-                manager_out = manager(
-                    LoggingChatClient(chat_client, log, "manager", cycle_id=cycle_id), as_of=as_of, model=model,
-                    calls=calls, lots=lots, risk=risk, equity=snapshot["equity"], free_margin=snapshot["free_margin"],
-                )
-                proposal = manager_out["proposal"]
-            except Exception as exc:
-                if not hold_on_manager_error:
-                    raise
-                # A provider outage must not take the shadow book down with it: None is a hold-all (guardrail 1).
-                manager_error = f"{type(exc).__name__}: {exc}"
-                proposal = None
+            proposal = None
+            for attempt in range(1, MANAGER_ATTEMPTS + 1):
+                try:
+                    manager_out = manager(
+                        LoggingChatClient(chat_client, log, "manager", cycle_id=cycle_id), as_of=as_of, model=model,
+                        calls=calls, lots=lots, risk=risk, equity=snapshot["equity"], free_margin=snapshot["free_margin"],
+                    )
+                except Exception as exc:
+                    manager_error = f"{type(exc).__name__}: {exc}"
+                    log.append(agent=name, event_type="error", payload={"error": manager_error, "attempt": attempt})
+                    if attempt == MANAGER_ATTEMPTS and not hold_on_manager_error:
+                        raise
+                else:
+                    manager_error, proposal = None, manager_out["proposal"]
+                    break
+            # A provider outage must not take the shadow book down with it: None is a hold-all
+            # (guardrail 1). The handler alerts on `manager_error`.
         else:
             proposal = shadow_proposal(calls, book_state, risk, config.shadow_risk_budget)
         applied, violations = apply_guardrails(proposal, book_state, calls, specs, risk, config.guardrails, breaker_active)
@@ -187,7 +202,7 @@ def _run_portfolio(
             "calls": calls, "failed_commodities": [c for c in COMMODITIES if calls[c] is None],
             "stop_outs": stop_outs, "opening_equity": snapshot["equity"],
             "breaker_active": breaker_active, "breaker_reset_applied": reset_applied, "raw_proposal": proposal,
-            "manager_error": manager_error,
+            "manager_error": manager_error, "risk_errors": risk_errors,
             "applied_deltas": applied, "violations": violations, "fills": fills,
             "closing_state": book.state(), "closing_lots": _lots(book.state(), specs), **closing,
         }
@@ -195,8 +210,6 @@ def _run_portfolio(
             ("proposal_raw", proposal), ("proposal_applied", applied), ("violations", violations), ("fills", fills),
         ):
             log.append(agent=name, event_type=event_type, payload=payload)
-        if manager_error:
-            log.append(agent=name, event_type="error", payload={"error": manager_error})
         if not off_schedule:
             storage.put_if_absent(f"portfolio/{name}/cycles/{cycle_id}.json", json.dumps(record).encode())
         results[name] = record
