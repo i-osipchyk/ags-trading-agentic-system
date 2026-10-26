@@ -218,7 +218,7 @@ Deterministic checks between the manager's proposal and the paper book. All nume
 | 5 | Gross leverage | Sum of absolute notionals ≤ 3.0× equity | Scale all legs proportionally |
 | 6 | Margin buffer | Used margin ≤ 40% of equity | Scale down |
 | 7 | No-churn threshold | Resize < 20% of the current leg, or < 1 volume step | Drop that trade |
-| 8 | Drawdown breaker | Equity < 80% of peak → reductions only, until manually reset | Clamp to ≤ current size |
+| 8 | Drawdown breaker | Equity < 60% of peak → reductions only, until manually reset | Clamp to ≤ current size |
 | 9 | Missing input | A commodity whose pipeline failed | Hold that leg as-is, override the manager's line |
 
 Guardrails 3–6 and a stop-out can still shrink a neutral-frozen leg; nothing else moves it. A symbol whose minimum volume already exceeds its per-commodity cap simply can't be held — reported as a violation, never silently rounded up.

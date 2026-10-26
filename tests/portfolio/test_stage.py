@@ -292,3 +292,79 @@ def test_h1_bars_are_captured_for_every_symbol_not_only_the_ones_held(storage):
     run(storage, market, CYCLE2, calls(), StubManager())
 
     assert storage.list("data/ctrader/h1_bars/cocoa/")
+
+
+def test_the_drawdown_breaker_defaults_to_a_40_percent_drawdown():
+    assert PortfolioConfig.from_mapping({}).drawdown_breaker == pytest.approx(0.60)
+
+
+# --- replay mode: market data read back from what the official cycle captured, never fetched or written
+
+
+class NoMarket:
+    def __getattr__(self, name):
+        raise AssertionError(f"a replay must not call the market ({name})")
+
+
+class ReadOnlyData:
+    def __init__(self, inner):
+        self._inner = inner
+
+    def get(self, key):
+        return self._inner.get(key)
+
+    def list(self, prefix):
+        return self._inner.list(prefix)
+
+    def put(self, key, data):
+        raise AssertionError(f"a replay must not write market data ({key})")
+
+    put_if_absent = put
+
+
+LATE = timedelta(minutes=7)  # a live cycle reads the market minutes after its scheduled time
+LATER = timedelta(days=30)
+
+
+def _official(storage, market, when, call_map, manager):
+    run_portfolio(
+        cycle_id(when), call_map, storage, as_of=when, now=when + LATE, chat_client=manager, model="stub",
+        market_client=market, config=CONFIG,
+    )
+    return read_cycle(storage, "manager", when)
+
+
+def _replayed(storage, when, call_map, manager, quoted_at):
+    from ags.storage import Prefixed
+
+    return run_portfolio(
+        cycle_id(when), call_map, Prefixed(storage, "replays/r1"), as_of=when, now=when + LATER, chat_client=manager,
+        model="stub", market_client=NoMarket(), config=CONFIG, data=ReadOnlyData(Prefixed(storage, "data")),
+        quoted_at=datetime.fromisoformat(quoted_at),
+    )
+
+
+def test_a_replayed_cycle_fills_at_the_quotes_the_official_cycle_captured(storage):
+    market = FakeMarket()
+    official = _official(storage, market, CYCLE1, calls(corn=call("bullish")), StubManager())
+    market.bid["Corn"], market.ask["Corn"] = 9.99, 10.01  # the market moved on since
+
+    replayed = _replayed(storage, CYCLE1, calls(corn=call("bullish")), StubManager({"corn": 8.0}), official["quoted_at"])
+
+    assert [(f["symbol"], f["price"]) for f in replayed["manager"]["fills"]] == [("corn", 5.01)]
+    assert storage.list("replays/r1/portfolio/manager/cycles/") == [f"replays/r1/portfolio/manager/cycles/{cycle_id(CYCLE1)}.json"]
+
+
+def test_a_replayed_cycle_reproduces_the_official_stop_out_from_stored_h1_bars(storage):
+    market = FakeMarket()
+    c = calls(corn=call("bullish"), soybeans=call("bearish"))
+    first = _official(storage, market, CYCLE1, c, StubManager({"corn": 8.0, "soybeans": -2.0}))
+    _crash(market)
+    second = _official(storage, market, CYCLE2, c, StubManager())
+
+    _replayed(storage, CYCLE1, c, StubManager({"corn": 8.0, "soybeans": -2.0}), first["quoted_at"])
+    replayed = _replayed(storage, CYCLE2, c, StubManager(), second["quoted_at"])
+
+    assert second["stop_outs"]  # the scenario does stop out
+    assert replayed["manager"]["stop_outs"] == second["stop_outs"]
+    assert replayed["manager"]["equity"] == pytest.approx(second["equity"])

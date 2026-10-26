@@ -184,6 +184,10 @@ def test_cycle_state_machine_keeps_the_fixed_run_shape():
     assert portfolio["Parameters"]["results.$"] == "$.results"
 
 
+def test_the_drawdown_breaker_trips_at_a_40_percent_drawdown():
+    assert re.search(r'DRAWDOWN_BREAKER\s*=\s*"0.60"', _block(MAIN, r'variable\s+"limits"'))
+
+
 def test_breaker_parameter_lives_under_the_env_path_and_terraform_ignores_its_value():
     body = _resource(MAIN, "aws_ssm_parameter", "breaker_reset_at")
     assert 'name  = "/${var.project}/${var.env}/breaker-reset-at"' in body
@@ -230,3 +234,4 @@ def test_deploy_uses_the_platform_workflow_for_live_and_waits_for_running_cycles
 def test_deploy_authenticates_with_oidc_not_stored_keys():
     assert "id-token: write" in DEPLOY
     assert "AWS_SECRET_ACCESS_KEY" not in DEPLOY
+

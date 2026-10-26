@@ -470,8 +470,11 @@ def get_h1_bars(
     as_of: datetime,
     client: MarketDataClient | None = None,
     now: datetime | None = None,
+    fetch: bool = True,
 ) -> list[dict]:
     """Completed H1 bars with open time in [start, end), as known at `as_of`.
+
+    `fetch=False` only reads what is already stored (a counterfactual replay).
 
     Each live fetch is stored PIT under its capture instant, along with how far
     it covers; a call only fetches the hours after what earlier captures
@@ -490,7 +493,7 @@ def get_h1_bars(
     captures = [c for c in captures if datetime.fromisoformat(c["captured_at"]) <= cutoff]
     covered = max((datetime.fromisoformat(c["covers_until"]) for c in captures), default=None)
 
-    if as_of >= now and (covered is None or covered < horizon):
+    if fetch and as_of >= now and (covered is None or covered < horizon):
         owns_client = client is None
         if client is None:
             client = CTraderPricesClient(Config.from_env())
