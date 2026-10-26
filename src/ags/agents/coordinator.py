@@ -15,6 +15,11 @@ disagreement explicitly rather than smoothing it over. An output marked
 "carried_forward": true was not refreshed this cycle: it is the latest one
 from an earlier run (named by "source_run_id"), so weigh its age.
 
+An analyst output with "degraded": true is partial — a source or tool failed, or
+its reply came back incomplete — so weigh it as weaker evidence. An output with
+an "error" field crashed and carries no signal: list it as neither supporting
+nor dissenting.
+
 Conviction rubric (anchored to analyst agreement, not free judgment):
   5 = all four analysts agree, no material dissent
   4 = three of four agree, dissent is minor/tangential
@@ -40,17 +45,22 @@ not a miss. Use it to weigh drivers that did or didn't play out, not to
 override this week's analyst evidence."""
 
 
-def _rubric_violations(conviction: int, supporting: list, dissenting: list) -> list[str]:
+def _rubric_violations(conviction: int, supporting: list, dissenting: list, analyst_outputs: dict) -> list[str]:
+    violations = []
     # Only the agreement-anchored rungs are checkable from the output alone:
     # 5 needs unanimous support, 4 needs at least three of four.
     if conviction == 5 and (len(supporting) != 4 or dissenting):
-        return [f"conviction 5 requires all four analysts supporting with no dissent; got {len(supporting)} supporting, {len(dissenting)} dissenting"]
+        violations.append(f"conviction 5 requires all four analysts supporting with no dissent; got {len(supporting)} supporting, {len(dissenting)} dissenting")
     if conviction == 4 and len(supporting) < 3:
-        return [f"conviction 4 requires at least three analysts supporting; got {len(supporting)}"]
-    return []
+        violations.append(f"conviction 4 requires at least three analysts supporting; got {len(supporting)}")
+    crashed = sorted(a for a in {*supporting, *dissenting} if "error" in (analyst_outputs.get(a) or {}))
+    if crashed:
+        violations.append(f"crashed analysts carry no signal but were counted: {', '.join(crashed)}")
+    return violations
 
 
 _CALLS = {"bullish", "bearish", "neutral"}
+_ANALYSTS = {"technical", "news", "weather", "supply_demand"}
 _FIELDS = (
     "call",
     "conviction",
@@ -71,6 +81,18 @@ def _validate(parsed: dict) -> None:
     conviction = parsed["conviction"]
     if isinstance(conviction, bool) or not isinstance(conviction, int) or not 1 <= conviction <= 5:
         raise ValueError(f"conviction out of range: {conviction!r}")
+    for field in ("supporting_analysts", "dissenting_analysts"):
+        names = parsed[field]
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names) or not set(names) <= _ANALYSTS:
+            raise ValueError(f"{field} must list analysts from {sorted(_ANALYSTS)}: {names!r}")
+    if not isinstance(parsed["thesis"], str):
+        raise ValueError("thesis must be text")
+    drivers = parsed["key_drivers"]
+    if not isinstance(drivers, list) or not all(isinstance(d, dict) and "driver" in d and "source" in d for d in drivers):
+        raise ValueError("key_drivers must be a list of {driver, source}")
+    conditions = parsed["invalidation_conditions"]
+    if not isinstance(conditions, list) or not all(isinstance(c, str) for c in conditions):
+        raise ValueError("invalidation_conditions must be a list of text")
 
 
 def _result(price_at_call: dict | None, *, degraded: bool = False, **fields) -> dict:
@@ -128,8 +150,10 @@ def run_coordinator(
     )
     try:
         parsed = json.loads(loop_result.content)
+        if not isinstance(parsed, dict):
+            raise ValueError("reply is not a JSON object")
         _validate(parsed)
-    except (json.JSONDecodeError, ValueError, TypeError, KeyError):
+    except (json.JSONDecodeError, ValueError):
         # A malformed call degrades the run rather than crashing the pipeline,
         # same as the analysts; the null call is still logged and scoreable.
         return _result(price_at_call, degraded=True)
@@ -144,6 +168,8 @@ def run_coordinator(
         key_drivers=parsed["key_drivers"],
         invalidation_conditions=parsed["invalidation_conditions"],
         rubric_violations=_rubric_violations(
-            parsed["conviction"], parsed["supporting_analysts"], parsed["dissenting_analysts"]
+            parsed["conviction"], parsed["supporting_analysts"], parsed["dissenting_analysts"], analyst_outputs
         ),
+        # The call stands, but a failed read_track_record call means it was made on less than it asked for.
+        degraded=loop_result.tool_errors > 0,
     )

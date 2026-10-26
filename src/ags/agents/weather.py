@@ -1,6 +1,6 @@
-import json
 from datetime import datetime
 
+from ags.agents.output import list_of, of, parse_reply
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.growing_calendar import get_growing_calendar as compute_growing_calendar
 from ags.tools.sources.weather import SUPPORTED_REGIONS, WeatherClient
@@ -23,6 +23,9 @@ Respond with a JSON object containing exactly these fields:
     of observed conditions
   "risk_assessment": object mapping each region to "benign" | "watch" | "severe"
 No other text — JSON only."""
+
+
+_REPLY_FIELDS = {"regions_covered": list_of(str), "current_conditions": of(dict), "risk_assessment": of(dict)}
 
 
 def run_weather_analyst(
@@ -73,21 +76,12 @@ def run_weather_analyst(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
 
-    try:
-        parsed = json.loads(loop_result.content)
-    except json.JSONDecodeError:
-        return {
-            "regions_covered": [],
-            "current_conditions": {},
-            "stage_of_crop_cycle": stage_of_crop_cycle,
-            "risk_assessment": {},
-            "degraded": True,
-        }
+    parsed, complete = parse_reply(loop_result.content, _REPLY_FIELDS)
 
     return {
         "regions_covered": parsed.get("regions_covered", []),
         "current_conditions": parsed.get("current_conditions", {}),
         "stage_of_crop_cycle": stage_of_crop_cycle,
         "risk_assessment": parsed.get("risk_assessment", {}),
-        "degraded": degraded,
+        "degraded": degraded or not complete or loop_result.tool_errors > 0,
     }

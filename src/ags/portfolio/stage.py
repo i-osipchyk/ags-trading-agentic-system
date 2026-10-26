@@ -142,12 +142,18 @@ def _run_portfolio(
         breaker_active, reset_applied = _breaker(prev, snapshot, book, breaker_reset_at(), config)
         lots = _lots(book.state(), specs)
         book_state = {"equity": snapshot["equity"], "lots": lots}
+        manager_error = None
         if name == "manager":
-            manager_out = run_portfolio_manager(
-                LoggingChatClient(chat_client, log, "manager", cycle_id=cycle_id), as_of=as_of, model=model, calls=calls, lots=lots, risk=risk,
-                equity=snapshot["equity"], free_margin=snapshot["free_margin"],
-            )
-            proposal = manager_out["proposal"]
+            try:
+                manager_out = run_portfolio_manager(
+                    LoggingChatClient(chat_client, log, "manager", cycle_id=cycle_id), as_of=as_of, model=model,
+                    calls=calls, lots=lots, risk=risk, equity=snapshot["equity"], free_margin=snapshot["free_margin"],
+                )
+                proposal = manager_out["proposal"]
+            except Exception as exc:
+                # A provider outage must not take the shadow book down with it: None is a hold-all (guardrail 1).
+                manager_error = f"{type(exc).__name__}: {exc}"
+                proposal = None
         else:
             proposal = shadow_proposal(calls, book_state, risk, config.shadow_risk_budget)
         applied, violations = apply_guardrails(proposal, book_state, calls, specs, risk, config.guardrails, breaker_active)
@@ -160,6 +166,7 @@ def _run_portfolio(
             "calls": calls, "failed_commodities": [c for c in COMMODITIES if calls[c] is None],
             "stop_outs": stop_outs, "opening_equity": snapshot["equity"],
             "breaker_active": breaker_active, "breaker_reset_applied": reset_applied, "raw_proposal": proposal,
+            "manager_error": manager_error,
             "applied_deltas": applied, "violations": violations, "fills": fills,
             "closing_state": book.state(), "closing_lots": _lots(book.state(), specs), **closing,
         }
@@ -167,6 +174,8 @@ def _run_portfolio(
             ("proposal_raw", proposal), ("proposal_applied", applied), ("violations", violations), ("fills", fills),
         ):
             log.append(agent=name, event_type=event_type, payload=payload)
+        if manager_error:
+            log.append(agent=name, event_type="error", payload={"error": manager_error})
         if not off_schedule:
             storage.put_if_absent(f"portfolio/{name}/cycles/{cycle_id}.json", json.dumps(record).encode())
         results[name] = record

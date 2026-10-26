@@ -101,6 +101,22 @@ def storage(tmp_path):
     return LocalStorage(tmp_path)
 
 
+class FailingManager:
+    def complete(self, messages, tools, *, model):
+        raise ConnectionError("provider down")
+
+
+def test_a_manager_call_that_raises_holds_the_manager_book_and_the_shadow_book_still_trades(storage):
+    run(storage, FakeMarket(), CYCLE1, calls(corn=call("bullish")), FailingManager())
+
+    mgr, shadow = read_cycle(storage, "manager", CYCLE1), read_cycle(storage, "shadow", CYCLE1)
+    assert mgr["raw_proposal"] is None
+    assert set(mgr["applied_deltas"].values()) == {0.0}
+    assert [v["rule"] for v in mgr["violations"]] == ["schema"]
+    assert "ConnectionError: provider down" in mgr["manager_error"]
+    assert shadow["applied_deltas"]["corn"] == pytest.approx(1.0)
+
+
 def test_first_cycle_fills_both_books_and_holds_the_failed_commodity(storage):
     manager = StubManager({"corn": 8.0, "soybeans": -2.0, "cocoa": 3.0})
     c = calls(corn=call("bullish"), soybeans=call("bearish")) | {"cocoa": None}

@@ -205,3 +205,31 @@ def test_run_technical_analyst_retries_once_when_the_first_reply_is_not_json(tmp
 
     assert result["degraded"] is False
     assert result["seasonality_alignment"] == "typical"
+
+
+def test_run_technical_analyst_keeps_code_facts_when_the_reply_is_json_but_not_an_object(tmp_path):
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
+    chat_client = FakeChatClient(responses=[{"role": "assistant", "content": '["typical"]', "tool_calls": None}])
+
+    result = run_technical_analyst(
+        tmp_path, chat_client, commodity="corn", as_of=as_of, model="deepseek-chat",
+        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of.date())}), history_days=550,
+    )
+
+    assert result["degraded"] is True
+    assert result["trend"] is not None and result["volatility"] is not None
+
+
+def test_run_technical_analyst_degrades_a_reply_with_a_mistyped_field_but_keeps_the_good_ones(tmp_path):
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
+    reply = {"seasonality_alignment": "typical", "key_levels": "around 450", "chart_description": "steady"}
+    chat_client = FakeChatClient(responses=[{"role": "assistant", "content": json.dumps(reply), "tool_calls": None}])
+
+    result = run_technical_analyst(
+        tmp_path, chat_client, commodity="corn", as_of=as_of, model="deepseek-chat",
+        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of.date())}), history_days=550,
+    )
+
+    assert result["degraded"] is True
+    assert result["key_levels"] is None
+    assert result["seasonality_alignment"] == "typical"

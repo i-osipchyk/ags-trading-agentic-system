@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from ags.tools.sources.prices import CTRADER_SYMBOL_NAMES
+
 ROOT = Path(__file__).parent.parent
 INFRA = ROOT / "infra"
 PLATFORM_REF = "v0.1.2"
@@ -161,12 +163,17 @@ def test_cycle_state_machine_keeps_the_fixed_run_shape():
     states = asl["States"]
     commodities = states[asl["StartAt"]]["Result"]
     assert commodities == ["corn", "soybeans", "wheat", "sugar", "coffee", "cotton", "cocoa"]
+    # The portfolio stage holds any commodity it gets no result for, so a renamed one would be held forever.
+    assert commodities == list(CTRADER_SYMBOL_NAMES)
 
     mapper = next(s for s in states.values() if s["Type"] == "Map")
     assert mapper["MaxConcurrency"] == 7
     inner = mapper["ItemProcessor"]
     task = inner["States"][inner["StartAt"]]
-    assert task["Retry"][0]["MaxAttempts"] == 2 and task["Retry"][0]["BackoffRate"] > 1
+    # A late start only gets later on retry, so it goes straight to MarkFailed; it must precede States.ALL.
+    assert task["Retry"][0] == {"ErrorEquals": ["LateStartError"], "MaxAttempts": 0}
+    assert task["Retry"][-1]["ErrorEquals"] == ["States.ALL"]
+    assert task["Retry"][-1]["MaxAttempts"] == 2 and task["Retry"][-1]["BackoffRate"] > 1
     catch = task["Catch"][0]
     assert catch["ErrorEquals"] == ["States.ALL"]
     assert inner["States"][catch["Next"]]["Parameters"]["failed"] is True

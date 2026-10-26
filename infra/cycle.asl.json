@@ -25,6 +25,7 @@
             "Type": "Task",
             "Resource": "${commodity_pipeline_arn}",
             "Retry": [
+              { "ErrorEquals": ["LateStartError"], "MaxAttempts": 0 },
               {
                 "ErrorEquals": ["States.ALL"],
                 "IntervalSeconds": 10,

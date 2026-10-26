@@ -1,6 +1,8 @@
 import json
 from datetime import date, datetime
 
+import pytest
+
 from ags.agents.coordinator import run_coordinator
 from ags.tools.pit_store import ET
 
@@ -159,3 +161,32 @@ def test_coordinator_can_read_its_track_record_through_a_tool():
 def test_coordinator_has_no_tools_without_a_track_record():
     _, client = _call(FULL_AGREEMENT)
     assert client.calls[0]["tools"] is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ["not", "an", "object"],
+        {**FULL_AGREEMENT, "supporting_analysts": None},  # used to crash the rubric check outside the guard
+        {**FULL_AGREEMENT, "supporting_analysts": "technical, news, weather, supply_demand"},
+        {**FULL_AGREEMENT, "dissenting_analysts": ["macro"]},  # not one of the four
+        {**FULL_AGREEMENT, "thesis": {"text": "t"}},
+        {**FULL_AGREEMENT, "key_drivers": ["Iowa drought"]},
+        {**FULL_AGREEMENT, "invalidation_conditions": "rain"},
+    ],
+)
+def test_a_reply_with_a_mistyped_field_is_a_degraded_null_call_not_a_crash(bad):
+    result, _ = _call(bad)
+
+    assert result["call"] is None
+    assert result["degraded"] is True
+
+
+def test_counting_a_crashed_analyst_as_support_is_a_rubric_violation():
+    outputs = {**ANALYST_OUTPUTS, "news": {"degraded": True, "error": "KeyError: 'x'"}}
+
+    result, client = _call(FULL_AGREEMENT, outputs=outputs)
+
+    assert result["call"] == "bullish"
+    assert any("crashed" in v and "news" in v for v in result["rubric_violations"])
+    assert '"error"' in client.calls[0]["messages"][0]["content"]  # the prompt says how to treat it
