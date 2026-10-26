@@ -226,6 +226,8 @@ __marimo__/
 # Official-record mirror (pull-only) and unofficial local runs
 /portfolio/
 /local/
+# Counterfactual replays: local copies of replays/{replay_id}/ plus report.csv and differences.md
+/replays/
 
 # Terraform
 .terraform/

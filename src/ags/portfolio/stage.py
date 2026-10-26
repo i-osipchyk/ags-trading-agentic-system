@@ -40,7 +40,7 @@ class PortfolioConfig:
                 min_resize_fraction=num("MIN_RESIZE_FRACTION", 0.20),
             ),
             starting_equity=num("STARTING_EQUITY_USD", 10_000), stop_out_level=num("STOP_OUT_MARGIN_LEVEL", 0.50),
-            shadow_risk_budget=num("SHADOW_RISK_BUDGET", 0.01), drawdown_breaker=num("DRAWDOWN_BREAKER", 0.80),
+            shadow_risk_budget=num("SHADOW_RISK_BUDGET", 0.01), drawdown_breaker=num("DRAWDOWN_BREAKER", 0.60),
         )
 
 
@@ -84,7 +84,18 @@ def run_portfolio(
     config: PortfolioConfig,
     breaker_reset_at=lambda: None,
     off_schedule: bool = False,
+    data: Storage | None = None,
+    quoted_at: datetime | None = None,
+    manager=run_portfolio_manager,
+    hold_on_manager_error: bool = True,
 ) -> dict:
+    """One portfolio cycle. Live by default; a counterfactual replay passes `data` (the official
+    market-data store, read-only) and `quoted_at` (the official cycle's capture instant), so the
+    cycle reads back exactly the market data the official one captured and never fetches any,
+    and may swap in another `manager` (same signature as `run_portfolio_manager`). With
+    `hold_on_manager_error=False` a failed manager call raises instead of holding every leg, so
+    a replay is retried rather than recording an outage as the manager's decision.
+    """
     # Same upload-once-in-a-finally treatment as a commodity run's log on non-local storage.
     log = RunLog(storage, f"portfolio/logs/{cycle_id}", buffered=not isinstance(storage, LocalStorage))
     try:
@@ -92,17 +103,21 @@ def run_portfolio(
             return _run_portfolio(
                 cycle_id, calls, storage, log, as_of=as_of, now=now, chat_client=chat_client, model=model,
                 market_client=market_client, config=config, breaker_reset_at=breaker_reset_at,
-                off_schedule=off_schedule,
+                off_schedule=off_schedule, data=data, quoted_at=quoted_at, manager=manager,
+                hold_on_manager_error=hold_on_manager_error,
             )
     finally:
         log.close()
 
 
 def _run_portfolio(
-    cycle_id, calls, storage, log, *, as_of, now, chat_client, model, market_client, config, breaker_reset_at, off_schedule
+    cycle_id, calls, storage, log, *, as_of, now, chat_client, model, market_client, config, breaker_reset_at, off_schedule,
+    data, quoted_at, manager, hold_on_manager_error,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
-    data = Prefixed(storage, "data")
+    replaying = quoted_at is not None
+    data = data if data is not None else Prefixed(storage, "data")
+    quoted_at = quoted_at or now
     timestamp = as_of.isoformat()
     calls = {c: (calls.get(c) if (calls.get(c) or {}).get("call") else None) for c in COMMODITIES}
 
@@ -113,7 +128,7 @@ def _run_portfolio(
     specs, quotes, risk = {}, {}, {}
     for c in COMMODITIES:
         specs[c] = get_symbol_specs(data, commodity=c, as_of=as_of, client=market_client, now=now)
-        quotes[c] = get_quote(data, commodity=c, as_of=now, client=market_client, now=now)
+        quotes[c] = get_quote(data, commodity=c, as_of=quoted_at, client=market_client, now=now)
         bars = get_prices(
             data, commodity=c, start=as_of.date() - timedelta(days=_DAILY_LOOKBACK_DAYS), end=as_of.date(),
             as_of=as_of, client=market_client, now=now,
@@ -134,7 +149,10 @@ def _run_portfolio(
             # Captured now, but only bars that opened before the scheduled time (`end`). Every
             # symbol, not just the ones held: a replayed book may hold what this one didn't.
             h1 = {
-                c: get_h1_bars(data, commodity=c, start=since, end=as_of, as_of=now, client=market_client, now=now)
+                c: get_h1_bars(
+                    data, commodity=c, start=since, end=as_of, as_of=now, client=market_client, now=now,
+                    fetch=not replaying,
+                )
                 for c in COMMODITIES
             }
             held = {p["symbol_name"] for p in opening_state["positions"]}
@@ -146,12 +164,14 @@ def _run_portfolio(
         manager_error = None
         if name == "manager":
             try:
-                manager_out = run_portfolio_manager(
+                manager_out = manager(
                     LoggingChatClient(chat_client, log, "manager", cycle_id=cycle_id), as_of=as_of, model=model,
                     calls=calls, lots=lots, risk=risk, equity=snapshot["equity"], free_margin=snapshot["free_margin"],
                 )
                 proposal = manager_out["proposal"]
             except Exception as exc:
+                if not hold_on_manager_error:
+                    raise
                 # A provider outage must not take the shadow book down with it: None is a hold-all (guardrail 1).
                 manager_error = f"{type(exc).__name__}: {exc}"
                 proposal = None
@@ -162,7 +182,7 @@ def _run_portfolio(
         book.mark_to(quotes)
         closing = book.snapshot(quotes, specs)
         record = {
-            "cycle_id": cycle_id, "book": name, "as_of": timestamp, "quoted_at": now.isoformat(),
+            "cycle_id": cycle_id, "book": name, "as_of": timestamp, "quoted_at": quoted_at.isoformat(),
             "opening_state": opening_state,
             "calls": calls, "failed_commodities": [c for c in COMMODITIES if calls[c] is None],
             "stop_outs": stop_outs, "opening_equity": snapshot["equity"],

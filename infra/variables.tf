@@ -33,7 +33,7 @@ variable "limits" {
     GROSS_LEVERAGE_CAP    = "3.0"
     MARGIN_BUFFER         = "0.40"
     MIN_RESIZE_FRACTION   = "0.20"
-    DRAWDOWN_BREAKER      = "0.80"
+    DRAWDOWN_BREAKER      = "0.60"
     STARTING_EQUITY_USD   = "10000"
     SHADOW_RISK_BUDGET    = "0.01"
     STOP_OUT_MARGIN_LEVEL = "0.50"

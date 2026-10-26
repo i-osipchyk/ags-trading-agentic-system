@@ -198,6 +198,8 @@ The fixture suite gains intraday cases: same-day release before vs after
   agent saw and said, by replaying recorded tool results — never by
   re-hitting the model API or external sources live (which would risk PIT
   drift from revised sources and burn cost for no auditing benefit).
+  Re-running the coordinator and manager with a *different* model or prompt
+  is a separate thing: see § Counterfactual replay.
 - The log is the source of truth for both the auditor's frozen inputs and
   the chat interface's "no live tool calls" constraint.
 - **Cycles (v3):** `cycle_id` = `cycle_{trigger_timestamp}`. The seven
@@ -370,7 +372,7 @@ to matter.
   vars set by Terraform.
 - **Guardrail and book parameters** are config, never literals in code:
   `PER_COMMODITY_CAP=1.0`, `GRAIN_BUCKET_CAP=1.5`, `GROSS_LEVERAGE_CAP=3.0`,
-  `MARGIN_BUFFER=0.40`, `MIN_RESIZE_FRACTION=0.20`, `DRAWDOWN_BREAKER=0.80`,
+  `MARGIN_BUFFER=0.40`, `MIN_RESIZE_FRACTION=0.20`, `DRAWDOWN_BREAKER=0.60`,
   `STARTING_EQUITY_USD=10000`, `SHADOW_RISK_BUDGET=0.01`,
   `STOP_OUT_MARGIN_LEVEL=0.50` (verify against the Pepperstone account).
 
@@ -561,3 +563,63 @@ pieces are not repeated here.
   `infra/env/live.tfvars`). Start one cycle by hand, check it, then flip the
   flag in a PR.
 - Local CLI runs are the only sandbox; there is no dev/staging stack.
+
+## Counterfactual replay
+
+"What if the coordinator and manager had been a different model, prompt or
+output format from date X?" A replay answers it without re-running anything
+point-in-time-sensitive. Code: `src/ags/replay/`, run with
+`scripts/run_replay.py`.
+
+- **Spec** (`replays/{replay_id}/spec.json`): `fork_at`, and a `variant` +
+  `model` for the coordinator and the manager. Variants are named prompt and
+  output formats in `replay/variants.py` (`default` is the live agent); each
+  must still return what the next stage reads. A different spec under an
+  existing id is refused. DeepSeek models only for now.
+- **Runs locally, not on AWS**, so a variant is just code in the working
+  tree: a new prompt needs no deploy. `scripts/run_replay.py --spec <file>`
+  reads the official record from the bucket and writes the replay back to
+  it under `replays/{replay_id}/` (so a resume works from any machine). Per
+  cycle, oldest first (each opens from the previous book): the seven
+  coordinators in parallel, then the portfolio step. The replay never
+  connects to cTrader. The books run under the deployed portfolio Lambda's
+  limits (read from its environment), so they use the live guardrails.
+- **What is re-run:** only the coordinator (per commodity) and the manager.
+  Analysts are never re-run: their tools are PIT-bound, so the replay feeds
+  the coordinator the official run's logged analyst outputs, and the
+  official `price_at_call` (recomputed from stored daily bars if missing).
+- **Track record:** official runs before the fork, the replay's own runs
+  after it. Audits only for pre-fork runs (a post-fork audit grades the
+  official call). Replayed calls are not audited: P&L is the comparison.
+- **Books:** both replayed books (manager and shadow) start from the
+  official *manager's* closing state at the last official cycle before the
+  fork, so manager vs shadow compare from one starting point. Manual breaker
+  resets are ignored: a replayed book that trips the breaker stays tripped.
+- **Market data:** read-only, exactly what the official cycle captured —
+  quotes at its `quoted_at`, specs and daily bars as of its `as_of`, H1 bars
+  as of now bounded by its `as_of` (closed bars never change). The replay's
+  market client refuses every call and its data store refuses every write,
+  so missing data fails the replay instead of fetching or writing anything.
+- **Which cycles:** official cycles from `fork_at` with a manager book file,
+  so outage cycles (no book file) are skipped, as the official books skipped
+  them. A re-run resumes: cycles already replayed are skipped, and a
+  coordinator run already logged is returned without another model call.
+  A coordinator or manager model call that *fails* (outage, billing) saves
+  nothing as a decision: the coordinator logs an `error` event and no call,
+  the manager writes no book file for the cycle (a live cycle would instead
+  hold every leg). The run stops, and running it again asks the model
+  again. A malformed reply
+  is still a degraded call or a held proposal, as in live runs.
+- **Writes only** `replays/{replay_id}/`: `logs/` (official log format),
+  `portfolio/{manager,shadow}/cycles/`, `portfolio/logs/`.
+- **Local copy** (`replays/{replay_id}/` in the repo, gitignored), written
+  even when a run stops on a failure: everything under the replay's prefix
+  in the bucket, plus
+  - `report.csv`: per cycle, P&L since the fork of the official manager,
+    official shadow, replayed manager and replayed shadow (each from its own
+    book at the fork), and how many calls changed. Also printed at the end.
+  - `differences.md`: the spec, the code version (commit, and whether the
+    working tree had uncommitted changes), and for the coordinator and the
+    manager the model and a diff of the system prompt (which carries the
+    output format) between the latest replayed run and the official run at
+    the same time — what was actually sent, so only real changes show.

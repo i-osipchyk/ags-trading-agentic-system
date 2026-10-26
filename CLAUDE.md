@@ -54,6 +54,11 @@ On its own schedule:
 - **Auditor** — grades each call at 1/2/4/8 weeks (plus a 1-day diagnostic
   checkpoint) against price and against each named driver.
 
+For evaluation, a **counterfactual replay** re-runs only the coordinator and
+manager (another model, prompt or output format) from a fork date over the
+logged analyst outputs, into `replays/{replay_id}/` — never the official
+record. See `ARCHITECTURE.md` § Counterfactual replay.
+
 The four analysts run **in parallel and blind to each other** — this is
 load-bearing, not incidental. Do not give them visibility into each other's
 output or the coordinator's running view; that's what keeps their signals
