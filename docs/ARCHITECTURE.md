@@ -471,7 +471,9 @@ CloudWatch alarms (execution failed, Lambda errors) → SNS platform-alarms → 
   `swapShort`, swap calculation type, triple-swap day, margin rate), a
   bid/ask quote snapshot at fill time, H1 trendbars between cycles, daily
   bars for ATR. Specs are refetched daily and stored PIT, since swap rates
-  change.
+  change. H1 bars are captured for all seven symbols every cycle, not only
+  the ones held: a counterfactual replay's book may hold what the official
+  one didn't, and its stop-out replay needs those bars.
 - **Drawdown-breaker reset:** an SSM parameter `/ags/<env>/breaker-reset-at`
   (a plain String, created by Terraform with value `none`), set by hand
   (`aws ssm put-parameter --overwrite`). The portfolio Lambda reads it and records

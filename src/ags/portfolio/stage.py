@@ -131,13 +131,14 @@ def _run_portfolio(
         stop_outs = []
         if prev:
             since = datetime.fromisoformat(prev["as_of"])
-            held = [p["symbol_name"] for p in opening_state["positions"]]
-            # Captured now, but only bars that opened before the scheduled time (`end`).
+            # Captured now, but only bars that opened before the scheduled time (`end`). Every
+            # symbol, not just the ones held: a replayed book may hold what this one didn't.
             h1 = {
                 c: get_h1_bars(data, commodity=c, start=since, end=as_of, as_of=now, client=market_client, now=now)
-                for c in held
+                for c in COMMODITIES
             }
-            stop_outs = book.replay(h1, specs, since, as_of)
+            held = {p["symbol_name"] for p in opening_state["positions"]}
+            stop_outs = book.replay({c: h1[c] for c in held}, specs, since, as_of)
         snapshot = book.snapshot(quotes, specs)
         breaker_active, reset_applied = _breaker(prev, snapshot, book, breaker_reset_at(), config)
         lots = _lots(book.state(), specs)
