@@ -1,5 +1,5 @@
+import math
 from dataclasses import dataclass
-
 
 _EPS = 1e-9
 _GRAINS = ('corn', 'soybeans', 'wheat')
@@ -20,8 +20,13 @@ def _valid_deltas(proposal, symbols) -> dict | None:
         return None
     deltas = {}
     for leg in proposal["legs"]:
+        if not isinstance(leg, dict):
+            return None
         symbol, delta = leg.get("symbol"), leg.get("delta_lots")
-        if symbol in deltas or isinstance(delta, bool) or not isinstance(delta, (int, float)):
+        if not isinstance(symbol, str) or symbol in deltas:
+            return None
+        # NaN slips past every cap (its comparisons are all false) and then crashes the rounding.
+        if isinstance(delta, bool) or not isinstance(delta, (int, float)) or not math.isfinite(delta):
             return None
         deltas[symbol] = float(delta)
     return deltas if set(deltas) == set(symbols) else None

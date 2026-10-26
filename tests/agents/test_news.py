@@ -168,3 +168,35 @@ def test_run_news_analyst_surfaces_degraded_true_when_the_model_returns_unparsea
     )
 
     assert result == {"headlines": [], "degraded": True}
+
+
+def _reply(content: str) -> dict:
+    return {"role": "assistant", "content": content, "tool_calls": None}
+
+
+def _news(tmp_path, *responses):
+    return run_news_analyst(
+        tmp_path, FakeChatClient(list(responses)), commodity="corn",
+        as_of=datetime(2026, 6, 5, 16, 0, tzinfo=ET), model="deepseek-chat", news_client=FakeNewsClient(CORN_RESULTS),
+    )
+
+
+def test_run_news_analyst_flags_a_reply_under_the_wrong_key_instead_of_reporting_no_news(tmp_path):
+    result = _news(tmp_path, _reply(json.dumps({"news": [{"headline": "h"}]})))
+
+    assert result == {"headlines": [], "degraded": True}
+
+
+def test_run_news_analyst_degrades_instead_of_raising_on_a_json_list_reply(tmp_path):
+    assert _news(tmp_path, _reply("[]"))["degraded"] is True
+
+
+def test_run_news_analyst_degrades_when_the_model_calls_a_tool_that_does_not_exist(tmp_path):
+    bad_call = _tool_call_message("get_prices", {"start": "2026-06-01"})
+    result = _news(tmp_path, bad_call, _reply(json.dumps({"headlines": []})))
+
+    assert result == {"headlines": [], "degraded": True}
+
+
+def test_run_news_analyst_reports_genuinely_empty_news_as_not_degraded(tmp_path):
+    assert _news(tmp_path, _reply(json.dumps({"headlines": []}))) == {"headlines": [], "degraded": False}

@@ -62,13 +62,15 @@ class LoggingChatClient:
         # is otherwise unrecoverable from the log.
         self._log("response", {"content": response.get("content"), "usage": response.get("usage")})
         for tool_call in response.get("tool_calls") or []:
+            raw_arguments = tool_call["function"]["arguments"]
+            try:
+                arguments = json.loads(raw_arguments)
+            except json.JSONDecodeError:
+                # Logged verbatim; the loop answers the model with an error rather than crashing.
+                arguments = raw_arguments
             self._log(
                 "tool_call",
-                {
-                    "id": tool_call["id"],
-                    "name": tool_call["function"]["name"],
-                    "arguments": json.loads(tool_call["function"]["arguments"]),
-                },
+                {"id": tool_call["id"], "name": tool_call["function"]["name"], "arguments": arguments},
             )
         # +1 for the assistant response the loop appends after this call.
         self._seen = len(messages) + 1

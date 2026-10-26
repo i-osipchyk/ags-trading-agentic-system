@@ -1,3 +1,4 @@
+import inspect
 import json
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
@@ -20,6 +21,9 @@ class LoopResult:
     content: str
     tool_call_cap_hit: bool
     messages: list[dict] = field(default_factory=list)
+    # Tool calls the model got wrong (unknown name, unparseable or mismatched arguments).
+    # Callers fold this into `degraded`: the run went on, but on less evidence than it asked for.
+    tool_errors: int = 0
 
 
 def _tool_schema(tool: ToolSpec) -> dict:
@@ -31,6 +35,25 @@ def _tool_schema(tool: ToolSpec) -> dict:
             "parameters": tool.parameters,
         },
     }
+
+
+def _call_error(tool_by_name: dict[str, ToolSpec], tool_call: dict) -> tuple[ToolSpec, dict] | str:
+    """The tool and its arguments, or why the model's call can't be run as asked."""
+    name = tool_call["function"]["name"]
+    tool = tool_by_name.get(name)
+    if tool is None:
+        return f"unknown tool {name!r}; available: {sorted(tool_by_name)}"
+    try:
+        arguments = json.loads(tool_call["function"]["arguments"] or "{}")
+    except json.JSONDecodeError as exc:
+        return f"arguments are not valid JSON: {exc}"
+    if not isinstance(arguments, dict):
+        return "arguments must be a JSON object"
+    try:
+        inspect.signature(tool.function).bind(**arguments)
+    except TypeError as exc:
+        return f"arguments don't match {name}: {exc}"
+    return tool, arguments
 
 
 def run_loop(
@@ -51,6 +74,7 @@ def run_loop(
     ]
 
     tool_call_count = 0
+    tool_errors = 0
 
     while True:
         cap_hit = tool_call_count >= max_tool_calls
@@ -78,6 +102,7 @@ def run_loop(
                 content=response_message.get("content") or "",
                 tool_call_cap_hit=cap_hit,
                 messages=messages,
+                tool_errors=tool_errors,
             )
 
         for tool_call in tool_calls:
@@ -90,16 +115,21 @@ def run_loop(
             if tool_call_count >= max_tool_calls:
                 result = {"error": "tool_call_cap_hit: no further tool calls executed this run"}
             else:
-                # A tool that fails (bad stored data, an unknown name or malformed arguments
-                # from the model) is reported back as a result, not raised: the agent can
-                # still answer without it, instead of the whole agent degrading.
-                try:
-                    tool = tool_by_name[tool_call["function"]["name"]]
-                    arguments = json.loads(tool_call["function"]["arguments"])
-                    result = tool.function(**arguments)
-                except Exception as exc:
-                    result = {"error": f"{type(exc).__name__}: {exc}"}
+                # A bad call still counts toward the cap, so a model stuck repeating it can't loop forever.
                 tool_call_count += 1
+                resolved = _call_error(tool_by_name, tool_call)
+                if isinstance(resolved, str):
+                    tool_errors += 1
+                    result = {"error": resolved}
+                else:
+                    tool, arguments = resolved
+                    # A tool that fails on bad stored data is reported back too, not raised:
+                    # the agent can still answer without it.
+                    try:
+                        result = tool.function(**arguments)
+                    except Exception as exc:
+                        tool_errors += 1
+                        result = {"error": f"{type(exc).__name__}: {exc}"}
             messages.append(
                 {
                     "role": "tool",
@@ -155,4 +185,5 @@ def run_json_loop(
         content=retry.get("content") or "",
         tool_call_cap_hit=result.tool_call_cap_hit,
         messages=messages,
+        tool_errors=result.tool_errors,
     )

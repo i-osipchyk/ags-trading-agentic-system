@@ -1,11 +1,10 @@
-import json
 from datetime import datetime
 
+from ags.agents.output import list_of, of, parse_reply
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
-from ags.tools.sources.usda import EsmisClient, UsdaClient
+from ags.tools.sources.usda import EsmisClient, UsdaClient, report_for_symbol
 from ags.tools.sources.usda import get_balance_sheet_revisions as fetch_revisions
 from ags.tools.sources.usda import get_usda_report as fetch_usda_report
-from ags.tools.sources.usda import report_for_symbol
 
 SYSTEM_PROMPT_TEMPLATE = """You are the Supply/demand analyst for {commodity} futures.
 
@@ -22,6 +21,14 @@ Respond with a JSON object containing exactly these fields:
     where revision_direction is "up" | "down" | "unchanged"
   "stocks_to_use": {{"value": current stocks-to-use, "trend": "tightening" | "loosening"}}
 No other text — JSON only."""
+
+
+# Null is a legitimate answer for the report and stocks-to-use when nothing has been released yet.
+_REPLY_FIELDS = {
+    "latest_report": of(dict, type(None)),
+    "key_figures": list_of(dict),
+    "stocks_to_use": of(dict, type(None)),
+}
 
 
 def run_supply_demand_analyst(
@@ -82,14 +89,11 @@ def run_supply_demand_analyst(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
 
-    try:
-        parsed = json.loads(loop_result.content)
-    except json.JSONDecodeError:
-        return {"latest_report": None, "key_figures": [], "stocks_to_use": None, "degraded": True}
+    parsed, complete = parse_reply(loop_result.content, _REPLY_FIELDS)
 
     return {
         "latest_report": parsed.get("latest_report"),
         "key_figures": parsed.get("key_figures", []),
         "stocks_to_use": parsed.get("stocks_to_use"),
-        "degraded": degraded,
+        "degraded": degraded or not complete or loop_result.tool_errors > 0,
     }

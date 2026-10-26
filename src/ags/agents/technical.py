@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from ags.agents.output import of, parse_reply
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.chart import get_chart_snapshot as compute_chart_snapshot
 from ags.tools.pit_store import ET
@@ -13,6 +14,7 @@ from ags.tools.sources.prices import get_prices as fetch_prices
 from ags.tools.trend import get_trend_state as compute_trend_state
 from ags.tools.volatility import get_volatility as compute_volatility
 
+_REPLY_FIELDS = {"seasonality_alignment": of(str), "key_levels": of(dict), "chart_description": of(str)}
 _DEFAULT_HISTORY_DAYS = 365 * 3
 _DEFAULT_CHART_LOOKBACK_CANDLES = 30
 
@@ -138,12 +140,9 @@ def run_technical_analyst(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
 
-    try:
-        parsed = json.loads(loop_result.content)
-    except json.JSONDecodeError:
-        # Trend and volatility were computed by code and are still valid.
-        parsed = {}
-        degraded = True
+    # A malformed reply only loses the model's fields: trend and volatility were computed by code.
+    parsed, complete = parse_reply(loop_result.content, _REPLY_FIELDS)
+    degraded = degraded or not complete or loop_result.tool_errors > 0
 
     return {
         "trend": trend,

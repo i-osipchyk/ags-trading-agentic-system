@@ -101,6 +101,22 @@ def storage(tmp_path):
     return LocalStorage(tmp_path)
 
 
+class FailingManager:
+    def complete(self, messages, tools, *, model):
+        raise ConnectionError("provider down")
+
+
+def test_a_manager_call_that_raises_holds_the_manager_book_and_the_shadow_book_still_trades(storage):
+    run(storage, FakeMarket(), CYCLE1, calls(corn=call("bullish")), FailingManager())
+
+    mgr, shadow = read_cycle(storage, "manager", CYCLE1), read_cycle(storage, "shadow", CYCLE1)
+    assert mgr["raw_proposal"] is None
+    assert set(mgr["applied_deltas"].values()) == {0.0}
+    assert [v["rule"] for v in mgr["violations"]] == ["schema"]
+    assert "ConnectionError: provider down" in mgr["manager_error"]
+    assert shadow["applied_deltas"]["corn"] == pytest.approx(1.0)
+
+
 def test_first_cycle_fills_both_books_and_holds_the_failed_commodity(storage):
     manager = StubManager({"corn": 8.0, "soybeans": -2.0, "cocoa": 3.0})
     c = calls(corn=call("bullish"), soybeans=call("bearish")) | {"cocoa": None}
@@ -264,3 +280,15 @@ def test_cycle_file_records_closing_lots_per_symbol(storage):
     assert lots["corn"] == pytest.approx(8.0)
     assert lots["soybeans"] == pytest.approx(-2.0)
     assert lots["cocoa"] == 0.0
+
+
+def test_h1_bars_are_captured_for_every_symbol_not_only_the_ones_held(storage):
+    market = FakeMarket()
+    _first_cycle(storage, market)  # holds corn and soybeans only
+    market.h1["Cocoa"] = [
+        {"timestamp": "2026-01-07T02:00:00+00:00", "open": 5.0, "high": 5.1, "low": 4.9, "close": 5.0, "volume": 1}
+    ]
+
+    run(storage, market, CYCLE2, calls(), StubManager())
+
+    assert storage.list("data/ctrader/h1_bars/cocoa/")

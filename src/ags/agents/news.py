@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ags.agents.output import list_of, parse_reply
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.storage import Storage, as_storage
 from ags.tools.pit_store import ET
@@ -131,16 +132,13 @@ def run_news_analyst(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
 
-    try:
-        parsed = json.loads(loop_result.content)
-    except json.JSONDecodeError:
-        # Observed against the real model: once the tool-call cap forces a
-        # tools-disabled final call, it can still emit its own pseudo-tool-call
-        # markup as plain content instead of the requested JSON. A malformed
-        # final answer degrades the run rather than crashing the pipeline.
-        return {"headlines": [], "degraded": True}
+    # Observed against the real model: once the tool-call cap forces a
+    # tools-disabled final call, it can still emit its own pseudo-tool-call
+    # markup as plain content instead of the requested JSON. A malformed
+    # final answer degrades the run rather than crashing the pipeline.
+    parsed, complete = parse_reply(loop_result.content, {"headlines": list_of(dict)})
 
     return {
         "headlines": parsed.get("headlines", []),
-        "degraded": degraded,
+        "degraded": degraded or not complete or loop_result.tool_errors > 0,
     }

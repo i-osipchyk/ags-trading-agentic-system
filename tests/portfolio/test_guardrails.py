@@ -46,6 +46,10 @@ def rules(violations, symbol=None):
         {"legs": proposal()["legs"][:6], "portfolio_note": "n"},  # a symbol missing
         {"legs": proposal()["legs"] + [proposal()["legs"][0]], "portfolio_note": "n"},  # duplicate
         {"legs": [{"symbol": s, "delta_lots": "lots", "rationale": "r"} for s in SYMBOLS], "portfolio_note": "n"},
+        {"legs": SYMBOLS, "portfolio_note": "n"},  # legs that aren't objects
+        {"legs": proposal()["legs"][:6] + [{"symbol": ["cocoa"], "delta_lots": 0.0}], "portfolio_note": "n"},
+        proposal(corn=float("nan")),  # json.loads accepts a bare NaN
+        proposal(corn=float("inf")),
     ],
 )
 def test_a_malformed_proposal_holds_everything(bad):

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from ags.llm.loop import ToolSpec, run_loop
 
 
@@ -285,5 +287,45 @@ def test_run_loop_feeds_a_failing_tool_back_to_the_model_as_an_error():
     assert result.content == '{"call": "neutral"}'
     errors = [json.loads(m["content"])["error"] for m in result.messages if m["role"] == "tool"]
     assert errors[0] == "KeyError: 'conviction'"
-    assert errors[1].startswith("KeyError")
-    assert errors[2].startswith("JSONDecodeError")
+    assert errors[1].startswith("unknown tool")
+    assert errors[2].startswith("arguments are not valid JSON")
+    assert result.tool_errors == 3
+
+
+def _tool_call(name, arguments, call_id="call_1"):
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+
+
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        ("get_rainfall", '{"symbol": "ZC"}'),  # a tool that doesn't exist
+        ("get_trend", '{"symbol": "ZC"'),  # truncated JSON
+        ("get_trend", '["ZC"]'),  # arguments that aren't an object
+        ("get_trend", '{"ticker": "ZC"}'),  # wrong argument name
+    ],
+)
+def test_a_bad_tool_call_is_answered_with_an_error_and_counted_instead_of_crashing(name, arguments):
+    def get_trend(symbol):
+        raise AssertionError("must not run")
+
+    tool = ToolSpec(name="get_trend", description="d", parameters={"type": "object"}, function=get_trend)
+    client = FakeChatClient(
+        responses=[
+            {"role": "assistant", "content": None, "tool_calls": [_tool_call(name, arguments)]},
+            {"role": "assistant", "content": "{}", "tool_calls": None},
+        ]
+    )
+
+    result = run_loop(client, model="m", system_prompt="s", user_prompt="u", tools=[tool])
+
+    assert result.content == "{}"
+    assert result.tool_errors == 1
+    tool_message = client.calls[1]["messages"][-1]
+    assert tool_message["role"] == "tool" and "error" in json.loads(tool_message["content"])
+
+
+def test_a_clean_run_has_no_tool_errors():
+    client = FakeChatClient(responses=[{"role": "assistant", "content": "{}", "tool_calls": None}])
+
+    assert run_loop(client, model="m", system_prompt="s", user_prompt="u", tools=[]).tool_errors == 0
