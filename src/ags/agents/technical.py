@@ -79,21 +79,17 @@ def run_technical_analyst(
     except Exception:
         degraded = True
 
+    # Raises on a bad date or a source failure: the loop reports it and asks the model to retry.
     def _get_prices_tool(start: str, end: str) -> dict:
-        nonlocal degraded
-        try:
-            bars = fetch_prices(
-                data_dir,
-                commodity=commodity,
-                start=date.fromisoformat(start),
-                end=date.fromisoformat(end),
-                as_of=as_of,
-                client=prices_client,
-            )
-            return {"bars": bars}
-        except Exception as exc:
-            degraded = True
-            return {"error": str(exc)}
+        bars = fetch_prices(
+            data_dir,
+            commodity=commodity,
+            start=date.fromisoformat(start),
+            end=date.fromisoformat(end),
+            as_of=as_of,
+            client=prices_client,
+        )
+        return {"bars": bars}
 
     def _get_seasonality_tool() -> dict:
         nonlocal degraded
@@ -141,7 +137,7 @@ def run_technical_analyst(
     )
 
     # A malformed reply only loses the model's fields: trend and volatility were computed by code.
-    parsed, complete = parse_reply(loop_result.content, _REPLY_FIELDS)
+    parsed, complete, unparsed = parse_reply(loop_result.content, _REPLY_FIELDS)
     degraded = degraded or not complete or loop_result.tool_errors > 0
 
     return {
@@ -150,5 +146,6 @@ def run_technical_analyst(
         "seasonality_alignment": parsed.get("seasonality_alignment"),
         "key_levels": parsed.get("key_levels"),
         "chart_description": parsed.get("chart_description"),
+        **unparsed,
         "degraded": degraded,
     }

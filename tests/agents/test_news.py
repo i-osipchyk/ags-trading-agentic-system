@@ -167,7 +167,9 @@ def test_run_news_analyst_surfaces_degraded_true_when_the_model_returns_unparsea
         news_client=FakeNewsClient(results=CORN_RESULTS),
     )
 
-    assert result == {"headlines": [], "degraded": True}
+    assert result == {
+        "headlines": [], "unparsed_reply": '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="search_news">', "degraded": True,
+    }
 
 
 def _reply(content: str) -> dict:
@@ -184,7 +186,8 @@ def _news(tmp_path, *responses):
 def test_run_news_analyst_flags_a_reply_under_the_wrong_key_instead_of_reporting_no_news(tmp_path):
     result = _news(tmp_path, _reply(json.dumps({"news": [{"headline": "h"}]})))
 
-    assert result == {"headlines": [], "degraded": True}
+    # The coordinator still gets the headline, under the key the model used.
+    assert result == {"headlines": [], "unparsed_reply": {"news": [{"headline": "h"}]}, "degraded": True}
 
 
 def test_run_news_analyst_degrades_instead_of_raising_on_a_json_list_reply(tmp_path):
@@ -200,3 +203,26 @@ def test_run_news_analyst_degrades_when_the_model_calls_a_tool_that_does_not_exi
 
 def test_run_news_analyst_reports_genuinely_empty_news_as_not_degraded(tmp_path):
     assert _news(tmp_path, _reply(json.dumps({"headlines": []}))) == {"headlines": [], "degraded": False}
+
+
+class FlakyNewsClient(FakeNewsClient):
+    """Fails the first search, then answers."""
+
+    def search(self, query, *, published_before):
+        if not self.search_calls:
+            self.search_calls.append((query, published_before))
+            raise ConnectionError("Tavily request failed")
+        return super().search(query, published_before=published_before)
+
+
+def test_run_news_analyst_is_not_degraded_when_a_failed_search_succeeds_on_retry(tmp_path):
+    search = _tool_call_message("search_news", {"query": "corn futures news"})
+    chat_client = FakeChatClient([search, {**search, "tool_calls": [{**search["tool_calls"][0], "id": "call_2"}]}, _reply(json.dumps({"headlines": []}))])
+
+    result = run_news_analyst(
+        tmp_path, chat_client, commodity="corn", as_of=datetime(2026, 6, 5, 16, 0, tzinfo=ET), model="deepseek-chat",
+        news_client=FlakyNewsClient(results=CORN_RESULTS),
+    )
+
+    assert "retry" in json.loads(chat_client.calls[1]["messages"][-1]["content"])
+    assert result == {"headlines": [], "degraded": False}

@@ -117,6 +117,52 @@ def test_a_manager_call_that_raises_holds_the_manager_book_and_the_shadow_book_s
     assert shadow["applied_deltas"]["corn"] == pytest.approx(1.0)
 
 
+class FlakyManager(StubManager):
+    """Raises on the first call, then answers like StubManager."""
+
+    def complete(self, messages, tools, *, model):
+        if not self.prompts:
+            self.prompts.append(messages)
+            raise ConnectionError("provider blip")
+        return super().complete(messages, tools, model=model)
+
+
+def test_a_manager_call_that_raises_once_is_retried_and_its_proposal_used(storage):
+    run(storage, FakeMarket(), CYCLE1, calls(corn=call("bullish")), FlakyManager({"corn": 2.0}))
+
+    mgr = read_cycle(storage, "manager", CYCLE1)
+    assert mgr["manager_error"] is None
+    assert mgr["applied_deltas"]["corn"] == pytest.approx(2.0)
+    errors = [json.loads(line) for line in storage.get(f"portfolio/logs/{cycle_id(CYCLE1)}.jsonl").decode().splitlines()]
+    assert [e["payload"]["attempt"] for e in errors if e["event_type"] == "error"] == [1]
+
+
+class ShortHistoryMarket(FakeMarket):
+    """Too few daily bars for corn's ATR."""
+
+    def get_daily_bars(self, symbol_name, start, end):
+        bars = super().get_daily_bars(symbol_name, start, end)
+        return bars[-3:] if symbol_name == NAMES_TO_SYMBOL["corn"] else bars
+
+
+NAMES_TO_SYMBOL = dict(CTRADER_SYMBOL_NAMES)
+
+
+def test_a_symbol_without_risk_facts_is_held_and_the_cycle_still_runs(storage):
+    manager = StubManager({"corn": 2.0, "cocoa": 1.0})
+
+    run(storage, ShortHistoryMarket(), CYCLE1, calls(corn=call("bullish"), cocoa=call("bullish")), manager)
+
+    mgr, shadow = read_cycle(storage, "manager", CYCLE1), read_cycle(storage, "shadow", CYCLE1)
+    assert mgr["applied_deltas"]["corn"] == 0.0 and shadow["applied_deltas"]["corn"] == 0.0
+    assert "missing_input" in [v["rule"] for v in mgr["violations"] if v["symbol"] == "corn"]
+    assert "ValueError" in mgr["risk_errors"]["corn"]
+    assert mgr["applied_deltas"]["cocoa"] == pytest.approx(1.0)
+    # The manager is told corn couldn't be measured rather than given made-up numbers.
+    prompt = json.loads(manager.prompts[0][1]["content"])
+    assert prompt["risk"]["corn"] == {"atr": None, "atr_usd_per_lot": None}
+
+
 def test_first_cycle_fills_both_books_and_holds_the_failed_commodity(storage):
     manager = StubManager({"corn": 8.0, "soybeans": -2.0, "cocoa": 3.0})
     c = calls(corn=call("bullish"), soybeans=call("bearish")) | {"cocoa": None}

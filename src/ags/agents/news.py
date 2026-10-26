@@ -83,24 +83,13 @@ def run_news_analyst(
     model: str,
     news_client: NewsClient | None = None,
 ) -> dict:
-    degraded = False
-
+    # Both raise on a source failure: the loop reports it and asks the model to retry.
     def _search_news_tool(query: str) -> dict:
-        nonlocal degraded
-        try:
-            results = fetch_search_news(data_dir, commodity=commodity, query=query, as_of=as_of, client=news_client)
-            return {"results": results}
-        except Exception as exc:
-            degraded = True
-            return {"error": str(exc)}
+        results = fetch_search_news(data_dir, commodity=commodity, query=query, as_of=as_of, client=news_client)
+        return {"results": results}
 
     def _fetch_document_tool(url: str) -> dict:
-        nonlocal degraded
-        try:
-            return fetch_document_pit(data_dir, url=url, as_of=as_of, client=news_client)
-        except Exception as exc:
-            degraded = True
-            return {"error": str(exc)}
+        return fetch_document_pit(data_dir, url=url, as_of=as_of, client=news_client)
 
     tools = [
         ToolSpec(
@@ -136,9 +125,10 @@ def run_news_analyst(
     # tools-disabled final call, it can still emit its own pseudo-tool-call
     # markup as plain content instead of the requested JSON. A malformed
     # final answer degrades the run rather than crashing the pipeline.
-    parsed, complete = parse_reply(loop_result.content, {"headlines": list_of(dict)})
+    parsed, complete, unparsed = parse_reply(loop_result.content, {"headlines": list_of(dict)})
 
     return {
         "headlines": parsed.get("headlines", []),
-        "degraded": degraded or not complete or loop_result.tool_errors > 0,
+        **unparsed,
+        "degraded": not complete or loop_result.tool_errors > 0,
     }

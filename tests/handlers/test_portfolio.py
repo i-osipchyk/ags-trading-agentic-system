@@ -95,6 +95,18 @@ def test_tripping_the_drawdown_breaker_raises_an_alert(tmp_path):
     assert any("breaker" in a.lower() for a in alerts)
 
 
+def test_a_manager_that_fails_every_attempt_raises_an_alert(tmp_path):
+    from tests.portfolio.test_stage import FailingManager
+
+    runtime = _runtime(LocalStorage(tmp_path), manager=FailingManager())
+    runtime.alert = (alerts := []).append
+
+    handle(_event(_results()), runtime)
+
+    assert len(alerts) == 1
+    assert "manager" in alerts[0].lower() and "ConnectionError: provider down" in alerts[0]
+
+
 def test_off_schedule_cycles_never_alert(tmp_path):
     import dataclasses
 

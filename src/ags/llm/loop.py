@@ -21,8 +21,9 @@ class LoopResult:
     content: str
     tool_call_cap_hit: bool
     messages: list[dict] = field(default_factory=list)
-    # Tool calls the model got wrong (unknown name, unparseable or mismatched arguments).
-    # Callers fold this into `degraded`: the run went on, but on less evidence than it asked for.
+    # Failed tool calls (unknown name, bad arguments, or the tool raised) that no later call to
+    # the same tool made good. Callers fold this into `degraded`: the run went on, but on less
+    # evidence than it asked for. A failure the model fixed on retry isn't counted.
     tool_errors: int = 0
 
 
@@ -35,6 +36,15 @@ def _tool_schema(tool: ToolSpec) -> dict:
             "parameters": tool.parameters,
         },
     }
+
+
+# Sent with every failed call, so the model knows whether to fix its arguments or just call again.
+_ARGUMENTS_RETRY = "The call was not run because its arguments were wrong. Correct them and call {name} again."
+_UNKNOWN_TOOL_RETRY = "No tool has that name. Call one of the available tools instead."
+_RAISED_RETRY = (
+    "{name} failed while running. If the error points at your arguments, correct them; "
+    "either way, call {name} again."
+)
 
 
 def _call_error(tool_by_name: dict[str, ToolSpec], tool_call: dict) -> tuple[ToolSpec, dict] | str:
@@ -74,7 +84,8 @@ def run_loop(
     ]
 
     tool_call_count = 0
-    tool_errors = 0
+    # Failed calls per tool name (None: a name that doesn't exist), cleared by a later success.
+    unresolved: dict[str | None, int] = {}
 
     while True:
         cap_hit = tool_call_count >= max_tool_calls
@@ -102,7 +113,7 @@ def run_loop(
                 content=response_message.get("content") or "",
                 tool_call_cap_hit=cap_hit,
                 messages=messages,
-                tool_errors=tool_errors,
+                tool_errors=sum(unresolved.values()),
             )
 
         for tool_call in tool_calls:
@@ -117,19 +128,26 @@ def run_loop(
             else:
                 # A bad call still counts toward the cap, so a model stuck repeating it can't loop forever.
                 tool_call_count += 1
+                name = tool_call["function"]["name"]
                 resolved = _call_error(tool_by_name, tool_call)
                 if isinstance(resolved, str):
-                    tool_errors += 1
-                    result = {"error": resolved}
+                    known = name if name in tool_by_name else None
+                    unresolved[known] = unresolved.get(known, 0) + 1
+                    retry = _ARGUMENTS_RETRY.format(name=name) if known else _UNKNOWN_TOOL_RETRY
+                    result = {"error": resolved, "retry": retry}
                 else:
                     tool, arguments = resolved
-                    # A tool that fails on bad stored data is reported back too, not raised:
-                    # the agent can still answer without it.
+                    # A tool that fails (a source outage, bad stored data, arguments it can't
+                    # use) is reported back too, not raised: the model can retry or answer without it.
                     try:
                         result = tool.function(**arguments)
                     except Exception as exc:
-                        tool_errors += 1
-                        result = {"error": f"{type(exc).__name__}: {exc}"}
+                        unresolved[name] = unresolved.get(name, 0) + 1
+                        result = {"error": f"{type(exc).__name__}: {exc}", "retry": _RAISED_RETRY.format(name=name)}
+                    else:
+                        unresolved.pop(name, None)
+                        # A model that called a made-up name and then a real tool has recovered.
+                        unresolved.pop(None, None)
             messages.append(
                 {
                     "role": "tool",
@@ -142,14 +160,19 @@ def run_loop(
 _JSON_RETRY_NUDGE = (
     "Your previous reply was not valid JSON. Respond again with only the required JSON object — no other text."
 )
+_INVALID_RETRY_NUDGE = (
+    "Your previous reply did not meet the required format:\n{problems}\n"
+    "Respond again with only the corrected JSON object — no other text."
+)
 
 
-def _is_json(content: str) -> bool:
+def _retry_nudge(content: str, validate: Callable[[object], list[str]] | None) -> str | None:
     try:
-        json.loads(content)
+        parsed = json.loads(content)
     except json.JSONDecodeError:
-        return False
-    return True
+        return _JSON_RETRY_NUDGE
+    problems = validate(parsed) if validate else []
+    return _INVALID_RETRY_NUDGE.format(problems="\n".join(f"- {p}" for p in problems)) if problems else None
 
 
 def run_json_loop(
@@ -160,12 +183,13 @@ def run_json_loop(
     user_prompt: str,
     tools: list[ToolSpec],
     max_tool_calls: int = 5,
+    validate: Callable[[object], list[str]] | None = None,
 ) -> LoopResult:
     """`run_loop` for agents whose final reply must be JSON.
 
-    If the final reply isn't valid JSON, asks once more in the same
-    conversation, with no tools on offer. The second reply is returned
-    whether or not it parses — callers still handle a failed parse.
+    If the final reply isn't valid JSON, or `validate` (given the parsed reply) lists problems
+    with it, asks once more in the same conversation, naming what was wrong, with no tools on
+    offer. The second reply is returned whether or not it passes — callers still handle a bad one.
     """
     result = run_loop(
         client,
@@ -175,10 +199,11 @@ def run_json_loop(
         tools=tools,
         max_tool_calls=max_tool_calls,
     )
-    if _is_json(result.content):
+    nudge = _retry_nudge(result.content, validate)
+    if nudge is None:
         return result
 
-    messages = [*result.messages, {"role": "user", "content": _JSON_RETRY_NUDGE}]
+    messages = [*result.messages, {"role": "user", "content": nudge}]
     retry = client.complete(messages, None, model=model)
     messages.append(retry)
     return LoopResult(

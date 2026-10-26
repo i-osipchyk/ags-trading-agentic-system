@@ -164,5 +164,6 @@ def test_run_weather_analyst_surfaces_degraded_true_when_the_model_returns_unpar
         "current_conditions": {},
         "stage_of_crop_cycle": "harvest",
         "risk_assessment": {},
+        "unparsed_reply": "not valid json",  # handed to the coordinator as is
         "degraded": True,
     }
