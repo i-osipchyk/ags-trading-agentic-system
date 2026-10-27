@@ -60,13 +60,13 @@ src/ags/
     metrics.py       # equity curves, manager-vs-shadow P&L, spend rollups
   notify/            # Telegram client, alerts, daily digest (v3)
   handlers/          # Lambda entry points — thin wrappers, no logic (v3)
-  ui/                # Streamlit app: runs grid + job control (runs, jobs, runs_page), chat (chat, streamlit_app)
+  ui/                # Streamlit app: dashboard (dashboard, dashboard_page), runs grid + job control (runs, jobs, runs_page), chat (chat, streamlit_app)
 scripts/                 # every CLI and helper script
   run_pipeline.py        # one commodity run (local, unofficial namespace)
   run_cycle.py           # full cycle locally — 7 pipelines + portfolio stage (v3, unofficial)
   run_auditor.py         # trigger due checkpoint evaluations (all, or one via --run-id/--weeks)
-  run_chat.py            # Streamlit app: runs grid + chat over frozen runs
-  sync_local.sh          # pull-only S3 → local mirror (v3)
+  run_chat.py            # Streamlit app: dashboard (default), runs grid, chat over frozen runs
+  sync_local.sh          # pull-only S3 → local mirror (v3); optional prefix args (the dashboard pulls portfolio logs attempts)
   put_secrets.py         # .env → SSM /ags/<env>/* (v3)
   wait_for_cycle.sh      # deploy pre-apply: wait for no RUNNING cycle (v3)
   migrate_to_s3.py       # one-off: seed the bucket from a pre-v3 checkout (v3)
@@ -254,6 +254,20 @@ revisit.
   due") require a confirmation click. Logic lives in `ags.ui.runs`
   (`build_grid`) and `ags.ui.jobs` (cadence, locking, command builders);
   `ags.ui.runs_page` is rendering only.
+- **Dashboard:** the app's default page; the runs grid and chat stay as they were. It charts the
+  paper books over time from the local mirror (`portfolio/{manager,shadow}/cycles/`, `logs/`,
+  `attempts/`), on a UTC axis with All / 30d / 7d ranges: equity for both books with the
+  manager − shadow gap, max and current drawdown (recomputed from the closing-equity curve over
+  the range, not the book's recorded peak); signed positions per commodity
+  (lots or USD, shorts negative, plus gross) for a chosen book; the coordinator's calls as a grid
+  on the same time axis; margin utilization (used margin / equity, axis capped at 100%); cumulative P&L per commodity
+  for a chosen book, right after equity (realized fills and stop-outs plus open P&L at the cycle's marks, so spread
+  and commission are not in it); and LLM spend per UTC day (only days with a cost), stacked by commodity or agent, with the running
+  total as a line on a right-hand axis over the selected range (`notify.spend.daily_spend`; retried
+  attempts included, unpriced calls left out). "Pull latest data" runs
+  `scripts/sync_local.sh portfolio logs attempts` through the same one-job runner. It is read-only
+  and local like the rest of the app. Logic is in `ags.ui.dashboard` (pure pandas frames);
+  `ags.ui.dashboard_page` is rendering only.
 
 ## Auditor
 
@@ -483,7 +497,7 @@ is logged, never raised.
   expiry; the function role has no `DeleteObject`. Keys:
   `data/…`, `logs/…`, `audits/…`, `portfolio/…`, `archive/pre-v3/…`.
 - **Local mirror:** `scripts/sync_local.sh` = `aws s3 sync` **down only**
-  into `data/`, `logs/`, `audits/`, `portfolio/`. Nothing syncs up. Local CLI
+  into `data/`, `logs/`, `audits/`, `portfolio/`, `attempts/` (all, or only the prefixes named as arguments). Nothing syncs up. Local CLI
   runs use `LocalStorage` rooted at `local/` (also used for `--as-of`
   backtests), so they can never mix into the official record.
 

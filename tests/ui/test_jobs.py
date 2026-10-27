@@ -152,3 +152,9 @@ def test_produced_run_ids_are_read_from_the_pipeline_output_in_order():
 
 def test_output_without_run_ids_produces_none():
     assert produced_run_ids("graded corn_2026-10-02T15-40-41Z 1w\n1 graded, 0 failed") == []
+
+
+def test_sync_commands_pull_only_what_the_dashboard_reads():
+    from ags.ui.jobs import sync_commands
+
+    assert _args(sync_commands()) == [["scripts/sync_local.sh", "portfolio", "logs", "attempts"]]

@@ -104,6 +104,11 @@ def audit_commands(*, run_id: str | None = None, weeks: int | None = None) -> li
     return [command]
 
 
+def sync_commands() -> list[list[str]]:
+    """Pull-only sync of what the dashboard reads: the paper books, the portfolio logs and the retried attempts."""
+    return [["bash", str(_ROOT / "scripts" / "sync_local.sh"), "portfolio", "logs", "attempts"]]
+
+
 def produced_run_ids(output: str) -> list[str]:
     """Run ids a pipeline job reported, from the `run_id: ...` lines scripts/run_pipeline.py prints."""
     return [line.split(":", 1)[1].strip() for line in output.splitlines() if line.startswith("run_id:")]
