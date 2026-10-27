@@ -100,8 +100,12 @@ the position instead of calling the market.
   across cycles is what the auditor's per-agent scorecard depends on —
   don't make the fan-out adaptive without updating the design doc first.
 - **One writer to the official record.** S3 is the source of truth; local
-  is a pull-only mirror. Only the scheduled AWS cycle writes official runs,
-  and only the portfolio Lambda writes the paper book.
+  is a pull-only mirror. Only the scheduled AWS cycle writes official runs
+  (or its retry: a cycle held by a blocking provider error — no credit, a
+  rejected key — may be re-run for the same slot within `RETRY_WINDOW_HOURS`
+  via `scripts/retry_cycle.py`; see `ARCHITECTURE.md` § Retrying a held
+  cycle), and only the portfolio Lambda writes the paper book, at most one
+  record per slot.
 - **Everything logged**, keyed by `run_id` (per commodity) and `cycle_id`
   (per portfolio stage): prompts, tool calls, tool results, outputs, raw
   manager proposals, guardrail violations, and fills. Any run must be

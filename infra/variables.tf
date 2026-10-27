@@ -25,9 +25,11 @@ variable "schedules_enabled" {
 }
 
 variable "limits" {
-  description = "Guardrail and book parameters (ARCHITECTURE.md). Tuned here, never in code."
+  description = "Guardrail, book and cycle-operation parameters (ARCHITECTURE.md). Tuned here, never in code."
   type        = map(string)
   default = {
+    RETRY_WINDOW_HOURS    = "3" # a held cycle may be retried up to this long after its slot (max 6)
+    MIN_CYCLES_OF_CREDIT  = "4" # alert when DeepSeek / Tavily credit covers fewer cycles than this
     PER_COMMODITY_CAP     = "1.0"
     GRAIN_BUCKET_CAP      = "1.5"
     GROSS_LEVERAGE_CAP    = "3.0"

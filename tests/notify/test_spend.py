@@ -64,3 +64,28 @@ def test_unpriced_responses_are_counted_not_guessed(tmp_path):
     assert day["total"] == pytest.approx(0.25)
     assert day["unpriced"] == 2
     assert day["by_agent"] == pytest.approx({"technical": 0.25})
+
+
+def test_cycle_usage_sums_cost_and_counts_tavily_calls_from_the_cycles_logs(tmp_path):
+    import json
+
+    from ags.notify.spend import cycle_usage
+    from ags.storage import LocalStorage
+
+    storage = LocalStorage(tmp_path)
+
+    def line(agent, event_type, payload):
+        return json.dumps({"agent": agent, "event_type": event_type, "payload": payload, "timestamp": "t"})
+
+    storage.put("logs/corn_x.jsonl", "\n".join([
+        line("news", "response", {"usage": {"cost_usd": 0.25}}),
+        line("news", "tool_call", {"name": "search_news"}),
+        line("news", "tool_call", {"name": "fetch_document"}),
+        line("technical", "tool_call", {"name": "get_prices"}),
+        line("coordinator", "response", {"usage": {"cost_usd": None}}),
+    ]).encode())
+    storage.put("portfolio/logs/cycle_x.jsonl", line("manager", "response", {"usage": {"cost_usd": 0.5}}).encode())
+
+    usage = cycle_usage(storage, ["logs/corn_x.jsonl", "logs/missing.jsonl", "portfolio/logs/cycle_x.jsonl"])
+
+    assert usage == {"cost_usd": 0.75, "tavily_credits": 3}

@@ -14,9 +14,14 @@ from contextlib import AbstractContextManager, nullcontext
 
 from llmkit import LLM
 
+from ags import blockers
 from ags.llm.loop import ChatClient
 
 _PROVIDER = "deepseek"  # DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL, read by llmkit
+
+# DeepSeek statuses that no retry fixes: every later call fails the same way until someone tops
+# up or replaces the key (api-docs.deepseek.com/quick_start/error_codes).
+_BLOCKING_STATUS = {401: "authentication failed (check DEEPSEEK_API_KEY)", 402: "insufficient balance"}
 
 
 class LLMClient:
@@ -48,10 +53,14 @@ class BoundClient:
 
     def complete(self, messages: list[dict], tools: list[dict] | None, *, model: str) -> dict:
         kwargs = {"tools": tools} if tools else {}
-        result = self._llm.chat(
-            model=model, messages=messages, component=self.component, provider=_PROVIDER,
-            metadata=self.metadata, **kwargs,
-        )
+        try:
+            result = self._llm.chat(
+                model=model, messages=messages, component=self.component, provider=_PROVIDER,
+                metadata=self.metadata, **kwargs,
+            )
+        except Exception as exc:
+            record_if_blocking(exc)
+            raise
         message = result.message
 
         tool_calls = None
@@ -73,6 +82,13 @@ class BoundClient:
             # Priced by llmkit's table (the only one); None when the model has no price there.
             usage["cost_usd"] = result.record.cost_usd
         return {"role": message.role, "content": message.content, "tool_calls": tool_calls, "usage": usage}
+
+
+def record_if_blocking(exc: Exception) -> None:
+    """Note a DeepSeek error that will fail the next cycle too (the openai SDK's `status_code`)."""
+    status = getattr(exc, "status_code", None)
+    if status in _BLOCKING_STATUS:
+        blockers.record(_PROVIDER, f"HTTP {status}: {_BLOCKING_STATUS[status]}")
 
 
 def bind(client, component: str, **metadata) -> ChatClient:

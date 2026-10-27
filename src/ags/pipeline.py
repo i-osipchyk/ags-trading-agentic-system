@@ -111,12 +111,14 @@ def run_pipeline(
     news_client=None,
     weather_client=None,
     usda_client=None,
+    replace_log: bool = False,
 ) -> dict:
     run_id = generate_run_id(commodity, trigger_timestamp)
     log_store = as_storage(log_dir)
     # Non-local backends buffer the log and upload once; the finally below
-    # guarantees a crashed run still leaves its partial log.
-    raw_log = RunLog(log_store, run_id, buffered=not isinstance(log_store, LocalStorage))
+    # guarantees a crashed run still leaves its partial log. `replace_log`: a retry, whose
+    # earlier attempt the caller has archived, starts the log over instead of appending to it.
+    raw_log = RunLog(log_store, run_id, buffered=not isinstance(log_store, LocalStorage), fresh=replace_log)
     try:
         with trace(chat_client, run_id):
             return _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
