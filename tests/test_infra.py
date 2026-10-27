@@ -124,7 +124,7 @@ def test_no_reserved_concurrency_while_the_account_limit_is_10():
 
 
 @pytest.mark.parametrize("name,cron", [
-    ("digest", "cron(0 17 ? * MON-FRI *)"),
+    ("digest", "cron(0 5,17 ? * MON-FRI *)"),  # an hour after each cycle starts
     ("auditor", "cron(0 18 ? * MON-FRI *)"),
 ])
 def test_function_schedules_run_in_new_york_time(name, cron):
@@ -132,6 +132,11 @@ def test_function_schedules_run_in_new_york_time(name, cron):
     assert line, f"missing schedule {name}"
     assert f'expression = "{cron}"' in line.group(1)
     assert 'timezone = "America/New_York"' in line.group(1)
+
+
+def test_functions_get_no_cost_explorer_access():
+    # The digest reports LLM spend only; AWS cost is left to the platform budget.
+    assert "ce:" not in _tf(INFRA)
 
 
 def test_cycle_schedule_starts_the_state_machine_twice_each_weekday_in_new_york_time():
