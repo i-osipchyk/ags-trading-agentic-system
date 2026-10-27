@@ -104,16 +104,11 @@ def _config():
 def digest_handler(event, context):
     from datetime import datetime, timezone
 
-    import boto3
-
     from ags.handlers import digest
-    from ags.notify.aws_cost import prior_day_aws_cost
     from ags.storage import S3Storage
 
-    now = datetime.now(timezone.utc)
     return digest.handle(
         event, storage=S3Storage(os.environ["AGS_BUCKET"]), telegram=_telegram(_config()),
-        # Cost Explorer is a global service whose API lives in us-east-1 only.
-        aws_cost=prior_day_aws_cost(boto3.client("ce", region_name="us-east-1"), now=now), now=now,
+        now=datetime.now(timezone.utc),
     )
 

@@ -36,7 +36,7 @@ module "app" {
   # America/New_York regardless of the deployment region. The twice-daily cycle starts the state
   # machine, which the module's scheduler role can't, so it lives in cycle.tf.
   schedules = {
-    digest  = { function = "digest", expression = "cron(0 17 ? * MON-FRI *)", timezone = "America/New_York" }
+    digest  = { function = "digest", expression = "cron(0 5,17 ? * MON-FRI *)", timezone = "America/New_York" }
     auditor = { function = "auditor", expression = "cron(0 18 ? * MON-FRI *)", timezone = "America/New_York" }
   }
   schedules_enabled = var.schedules_enabled
@@ -48,16 +48,6 @@ module "app" {
   write_bucket_arns = [module.data.arn]
   # No ssm_write: the cTrader tokens are the shared /platform/shared/ctrader-* pair, which only
   # the platform's platform-ctrader-token-refresh writes (platform docs/conventions.md § Secrets).
-
-  extra_policy_json = data.aws_iam_policy_document.functions_extra.json
-}
-
-data "aws_iam_policy_document" "functions_extra" {
-  statement {
-    sid       = "DigestAwsCost"
-    actions   = ["ce:GetCostAndUsage"]
-    resources = ["*"]
-  }
 }
 
 # Drawdown-breaker reset, read by the portfolio stage on every cycle:

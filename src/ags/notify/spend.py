@@ -38,6 +38,39 @@ def _empty() -> dict:
     return {"total": 0.0, "unpriced": 0, "by_agent": defaultdict(float), "by_commodity": defaultdict(float)}
 
 
+def _add(window: dict, key: str, event: dict, cost: float | None) -> None:
+    if cost is None:
+        window["unpriced"] += 1
+        return
+    window["total"] += cost
+    window["by_agent"][event["agent"]] += cost
+    window["by_commodity"][_commodity(key)] += cost
+
+
+def _plain(window: dict) -> dict:
+    return {"total": window["total"], "unpriced": window["unpriced"], "by_agent": dict(window["by_agent"]),
+            "by_commodity": dict(window["by_commodity"])}
+
+
+def _responses(storage: Storage, key: str):
+    """(event, usage) for every priced-or-unpriced model response in the log at `key`."""
+    for line in (storage.get(key) or b"").decode().splitlines():
+        event = json.loads(line)
+        usage = (event.get("payload") or {}).get("usage") if event["event_type"] == "response" else None
+        if usage:
+            yield event, usage
+
+
+def cycle_spend(storage: Storage, keys: list[str]) -> dict:
+    """LLM $ of one cycle, by agent and commodity: its run logs (`keys`) and their retried attempts."""
+    window = _empty()
+    for key in keys:
+        for k in [key, *storage.list(f"attempts/{key.removesuffix('.jsonl')}.attempt")]:
+            for event, usage in _responses(storage, k):
+                _add(window, k, event, usage.get("cost_usd"))
+    return _plain(window)
+
+
 def llm_spend(storage: Storage, *, now: datetime) -> dict:
     """LLM $ from the per-response usage in run logs: the last 24 h and the calendar month to date.
 
@@ -48,26 +81,13 @@ def llm_spend(storage: Storage, *, now: datetime) -> dict:
     day_ago = now - timedelta(hours=24)
     # attempts/: the replaced attempts of retried runs, which spent money too (logging/attempts.py).
     for key in storage.list("logs/") + storage.list("portfolio/logs/") + storage.list("attempts/"):
-        for line in storage.get(key).decode().splitlines():
-            event = json.loads(line)
-            usage = (event.get("payload") or {}).get("usage") if event["event_type"] == "response" else None
-            if not usage:
-                continue
+        for event, usage in _responses(storage, key):
             at = datetime.fromisoformat(event["timestamp"])
-            cost = usage.get("cost_usd")
             member = []
             if at > day_ago and at <= now:
                 member.append("24h")
             if (at.year, at.month) == (now.year, now.month) and at <= now:
                 member.append("mtd")
             for name in member:
-                w = windows[name]
-                if cost is None:
-                    w["unpriced"] += 1
-                    continue
-                w["total"] += cost
-                w["by_agent"][event["agent"]] += cost
-                w["by_commodity"][_commodity(key)] += cost
-    return {k: {"total": v["total"], "unpriced": v["unpriced"], "by_agent": dict(v["by_agent"]),
-                "by_commodity": dict(v["by_commodity"])}
-            for k, v in windows.items()}
+                _add(windows[name], key, event, usage.get("cost_usd"))
+    return {k: _plain(v) for k, v in windows.items()}
