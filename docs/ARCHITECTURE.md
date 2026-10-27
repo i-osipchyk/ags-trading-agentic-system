@@ -393,6 +393,7 @@ EventBridge Scheduler  cron(0 4,16 ? * MON-FRI *)  tz America/New_York
 Scheduler (weekdays 17:00 ET) → Lambda digest
 Scheduler (weekdays 18:00 ET) → Lambda auditor
 CloudWatch alarms (execution failed, Lambda errors) → SNS platform-alarms → Telegram
+scripts/retry_cycle.py (by hand) → Step Functions, same slot, within the retry window
 ```
 
 - **One container image** (ECR repo `ags`, arm64, pinned by digest), all four Lambdas, different handler
@@ -409,7 +410,8 @@ CloudWatch alarms (execution failed, Lambda errors) → SNS platform-alarms → 
   invocations and re-established on failure.
 - **Late-start rule:** a cycle whose execution starts more than 1 h after its
   `scheduled_time` aborts and alerts rather than running late — a late run
-  would break comparability.
+  would break comparability. The one exception is the retry of a held cycle
+  (below), allowed up to `RETRY_WINDOW_HOURS` (default 3, capped at 6).
 - **Missing commodity:** the portfolio Lambda receives the Map results; a
   `failed: true` commodity becomes a `null` call → guardrail 9 holds its leg.
   Two consecutive failures for the same commodity alert.
@@ -426,6 +428,44 @@ CloudWatch alarms (execution failed, Lambda errors) → SNS platform-alarms → 
   pipeline and the manager but **do not write either book** — the proposal
   and would-be fills are logged only. Keeps the paper P&L strictly on the
   scheduled cadence.
+
+### Retrying a held cycle
+
+A provider error that no retry fixes, DeepSeek 401/402 (bad key, no balance) or Tavily
+401/403/432/433 (bad key, plan or pay-as-you-go limit), fails every later cycle too until
+someone acts. Agents catch it like any outage (degraded output, null call) and nothing raises,
+so `llm/client.py` and `tools/sources/news.py` record it in `ags/blockers.py`, per invocation.
+
+- **Held, not written.** A commodity run that hit one returns `blocked` and appends a
+  `blocked` event to its run log. If any commodity, or the manager's own calls, was blocked,
+  the portfolio stage computes both books as usual but writes **neither** cycle file. Its log
+  gets a `held` event, and one alert names the provider, where it hit, and the retry deadline.
+  The other cycle alerts (manager failed, commodity failed twice) are skipped as the same
+  problem. A held slot that isn't retried is simply missing from the book; the next cycle
+  picks up from the last written one (stop-outs are replayed over the gap as usual).
+- **Retry:** fix the provider, then `uv run python scripts/retry_cycle.py` (default: the
+  latest slot; `--slot` for another). It starts the state machine with the slot's own
+  `scheduled_time`, so cycle_id, run ids and `as_of` are unchanged. It refuses a slot that is
+  already in the book, was never attempted (use `trigger_cycle.py` for a new cycle), is past
+  the window, or while a cycle is running. The Lambdas enforce the same window themselves.
+- **What re-runs:** a "retry" is detected from storage, not from the input. A commodity whose
+  run log already holds an unblocked call reuses it without calling a model. Any other
+  commodity, and the portfolio stage, copies its earlier log to
+  `attempts/<key>.attempt<n>.jsonl` and starts the log over at the official key. So readers of
+  `logs/` still see one attempt per run, and nothing logged is lost. A Step Functions retry of
+  a crashed pipeline takes the same path. A slot already in the book is a no-op.
+- **Point in time:** decisions stay `as_of` the scheduled time (the PIT reads, and the
+  evening news search cached by the first attempt). News is filtered at date granularity, so a
+  late evening retry can see a same-day article published after 16:00 that an on-time run
+  wouldn't have. This is the accepted cost of the window. Fills are at the quote when the
+  retry's portfolio stage runs, like any cycle.
+
+**Credit warnings.** After every scheduled cycle, held or not, the portfolio Lambda reads the
+DeepSeek balance (`/user/balance`) and Tavily credits (`/usage`), and alerts when either is
+exhausted or covers fewer than `MIN_CYCLES_OF_CREDIT` (default 4) more cycles at this cycle's
+rate (`notify/balances.py`). The rate is this cycle's LLM $ from its run logs, and for Tavily an
+upper bound counted from the news agent's tool calls, on evening cycles only. A check that fails
+is logged, never raised.
 
 ## Storage backend (v3)
 
@@ -520,9 +560,15 @@ the shared pair with the developer's AWS credentials for any `CTRADER_*` key
   wrapper (HTML parse mode, long messages split).
 - **Alerts:** CloudWatch alarms (Step Functions execution failed, Lambda
   errors) go to the shared `platform-alarms` SNS topic, whose notifier posts
-  to Telegram — there is no ags-specific alarm forwarder. Direct alerts come
-  from the portfolio Lambda (commodity failed two cycles running, breaker
-  tripped). A failed cTrader token refresh alarms from the platform.
+  to Telegram — there is no ags-specific alarm forwarder. The notifier adds
+  the cause on ALARM: the function's latest error lines in the window, or the
+  failed execution's error and cause. `handlers/entry.py` logs one
+  `ags-error handler=… commodity=… cycle_id=… run_id=… error=…` line before a
+  handler's exception propagates, so that cause names the commodity or cycle.
+  Direct alerts come from the portfolio Lambda (cycle held by a blocking
+  provider error, credit running low, manager failed, commodity failed two
+  cycles running, breaker tripped). A failed cTrader token refresh alarms
+  from the platform.
 - **Digest:** the `digest` Lambda reads the last 24 h of cycle files and run
   logs from S3. LLM spend is summed from the per-call `usage.cost_usd` that
   llmkit priced and the LLM layer records in run logs (by agent, by

@@ -3,10 +3,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from ags.config import Config
+from ags.notify.balances import provider_balances
 from ags.portfolio.stage import PortfolioConfig
 from ags.storage import S3Storage, Storage
 
 LATE_START_LIMIT = timedelta(hours=1)
+# A slot that was attempted but never reached the book (a held cycle) may be retried this late.
+# Capped well inside the 12 h to the next cycle, so a retry can never overlap it.
+DEFAULT_RETRY_WINDOW = timedelta(hours=3)
+MAX_RETRY_WINDOW = timedelta(hours=6)
+DEFAULT_MIN_CYCLES_OF_CREDIT = 4
 
 
 class LateStartError(Exception):
@@ -27,6 +33,15 @@ class Runtime:
     portfolio_config: PortfolioConfig | None = None
     breaker_reset_at: Callable[[], datetime | None] = lambda: None
     alert: Callable[[str], None] = lambda message: None
+    retry_window: timedelta = DEFAULT_RETRY_WINDOW
+    # Provider balances for the low-credit check ({} when unknown, as in tests).
+    balances: Callable[[], dict] = lambda: {}
+    min_cycles_of_credit: int = DEFAULT_MIN_CYCLES_OF_CREDIT
+
+
+def retry_window_from(env) -> timedelta:
+    hours = float(env.get("RETRY_WINDOW_HOURS") or DEFAULT_RETRY_WINDOW.total_seconds() / 3600)
+    return min(timedelta(hours=hours), MAX_RETRY_WINDOW)
 
 
 def parse_scheduled_time(value: str) -> datetime:
@@ -38,10 +53,19 @@ def cycle_id_for(scheduled_time: str) -> str:
     return "cycle_" + parse_scheduled_time(scheduled_time).astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
 
 
-def check_late_start(event: dict, now: datetime) -> None:
+def check_late_start(event: dict, now: datetime, *, retry_window: timedelta | None = None) -> None:
+    """Abort a start more than 1 h late, or more than `retry_window` late for a retry.
+
+    The caller passes `retry_window` only when this slot was already attempted and isn't in the
+    book, i.e. it's retrying a held cycle (ARCHITECTURE.md § Retrying a held cycle).
+    """
     scheduled = datetime.fromisoformat(event["scheduled_time"])
-    if now - scheduled > LATE_START_LIMIT:
-        raise LateStartError(f"started {now - scheduled} after scheduled_time {event['scheduled_time']}")
+    limit = LATE_START_LIMIT if retry_window is None else max(retry_window, LATE_START_LIMIT)
+    if now - scheduled > limit:
+        kind = "retry" if retry_window is not None else "start"
+        raise LateStartError(
+            f"{kind} {now - scheduled} after scheduled_time {event['scheduled_time']} (limit {limit})"
+        )
 
 
 def build_runtime(env, *, config: Config, ssm_client, chat_factory, market_factory, alert_factory=None) -> Runtime:
@@ -60,4 +84,6 @@ def build_runtime(env, *, config: Config, ssm_client, chat_factory, market_facto
         chat_client=chat_factory(config), model=config.deepseek_model, market_client=market_factory(config),
         now=lambda: datetime.now(timezone.utc), portfolio_config=PortfolioConfig.from_mapping(env),
         breaker_reset_at=breaker_reset_at, alert=alert_factory(config) if alert_factory else (lambda message: None),
+        retry_window=retry_window_from(env), balances=lambda: provider_balances(config),
+        min_cycles_of_credit=int(env.get("MIN_CYCLES_OF_CREDIT") or DEFAULT_MIN_CYCLES_OF_CREDIT),
     )

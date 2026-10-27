@@ -90,6 +90,8 @@ def run_portfolio(
     quoted_at: datetime | None = None,
     manager=run_portfolio_manager,
     hold_on_manager_error: bool = True,
+    hold_books=lambda: False,
+    replace_log: bool = False,
 ) -> dict:
     """One portfolio cycle. Live by default; a counterfactual replay passes `data` (the official
     market-data store, read-only) and `quoted_at` (the official cycle's capture instant), so the
@@ -97,15 +99,22 @@ def run_portfolio(
     and may swap in another `manager` (same signature as `run_portfolio_manager`). With
     `hold_on_manager_error=False` a failed manager call raises instead of holding every leg, so
     a replay is retried rather than recording an outage as the manager's decision.
+
+    `hold_books()`, asked once both books are computed, holds the whole slot out of the books
+    (logged, not written) so it can be retried: the handler's answer when a provider blocked the
+    cycle. The result's `held` says whether it did. `replace_log`: a retry, whose earlier attempt
+    the caller has archived, starts the cycle's log over.
     """
     # Same upload-once-in-a-finally treatment as a commodity run's log on non-local storage.
-    log = RunLog(storage, f"portfolio/logs/{cycle_id}", buffered=not isinstance(storage, LocalStorage))
+    log = RunLog(
+        storage, f"portfolio/logs/{cycle_id}", buffered=not isinstance(storage, LocalStorage), fresh=replace_log
+    )
     try:
         with trace(chat_client, cycle_id):
             return _run_portfolio(
                 cycle_id, calls, storage, log, as_of=as_of, now=now, chat_client=chat_client, model=model,
                 market_client=market_client, config=config, breaker_reset_at=breaker_reset_at,
-                off_schedule=off_schedule, data=data, quoted_at=quoted_at, manager=manager,
+                off_schedule=off_schedule, data=data, quoted_at=quoted_at, manager=manager, hold_books=hold_books,
                 hold_on_manager_error=hold_on_manager_error,
             )
     finally:
@@ -114,7 +123,7 @@ def run_portfolio(
 
 def _run_portfolio(
     cycle_id, calls, storage, log, *, as_of, now, chat_client, model, market_client, config, breaker_reset_at, off_schedule,
-    data, quoted_at, manager, hold_on_manager_error,
+    data, quoted_at, manager, hold_on_manager_error, hold_books,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     replaying = quoted_at is not None
@@ -210,7 +219,12 @@ def _run_portfolio(
             ("proposal_raw", proposal), ("proposal_applied", applied), ("violations", violations), ("fills", fills),
         ):
             log.append(agent=name, event_type=event_type, payload=payload)
-        if not off_schedule:
-            storage.put_if_absent(f"portfolio/{name}/cycles/{cycle_id}.json", json.dumps(record).encode())
         results[name] = record
-    return {"cycle_id": cycle_id, **results}
+    # Both books or neither: a held slot is written by its retry, or not at all.
+    held = hold_books()
+    if held:
+        log.append(agent="portfolio", event_type="held", payload={"reason": "blocking provider error"})
+    if not off_schedule and not held:
+        for name, record in results.items():
+            storage.put_if_absent(f"portfolio/{name}/cycles/{cycle_id}.json", json.dumps(record).encode())
+    return {"cycle_id": cycle_id, "held": held, **results}

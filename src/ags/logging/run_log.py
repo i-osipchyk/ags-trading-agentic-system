@@ -7,13 +7,14 @@ from ags.storage import Storage, as_storage
 
 
 class RunLog:
-    def __init__(self, log_dir: Storage | Path, run_id: str, *, buffered: bool = False) -> None:
+    def __init__(self, log_dir: Storage | Path, run_id: str, *, buffered: bool = False, fresh: bool = False) -> None:
         self._store = as_storage(log_dir)
         # Buffered: events go to a local temp file and are uploaded once, by
         # close() — for backends (S3) where a rewrite per event is a PUT per event.
         self._buffer = tempfile.NamedTemporaryFile("w+", prefix="runlog-", suffix=".jsonl") if buffered else None
         self._key = f"{run_id}.jsonl"
-        existing = self._store.get(self._key)
+        # Fresh: start empty and replace what's there (a retry, after attempts.archive kept it).
+        existing = None if fresh else self._store.get(self._key)
         self._lines = existing.decode().splitlines() if existing is not None else []
         self._next_seq = len(self._lines)
         if self._buffer is not None and self._lines:

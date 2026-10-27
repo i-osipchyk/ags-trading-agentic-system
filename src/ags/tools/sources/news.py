@@ -5,7 +5,9 @@ from urllib.parse import urlparse
 
 from dateutil import parser as dateutil_parser
 from tavily import TavilyClient
+from tavily.errors import ForbiddenError, InvalidAPIKeyError
 
+from ags import blockers
 from ags.config import Config
 from ags.tools.pit_store import ET, is_released, read_pit, write_pit
 
@@ -14,6 +16,10 @@ REPORT_SEARCH = "search_news"
 REPORT_DOCUMENTS = "documents"
 
 _MAX_SEARCH_RESULTS = 10
+
+# Errors no retry fixes: the client raises ForbiddenError for 403 and for 432/433 (plan or
+# pay-as-you-go credit limit reached), InvalidAPIKeyError for 401. A 429 is a rate limit, not this.
+_BLOCKING_ERRORS = (ForbiddenError, InvalidAPIKeyError)
 
 
 class NewsClient(Protocol):
@@ -52,7 +58,8 @@ class TavilyNewsClient:
         self._client = TavilyClient(api_key=config.tavily_api_key)
 
     def search(self, query: str, *, published_before: date) -> list[dict]:
-        response = self._client.search(
+        response = self._call(
+            self._client.search,
             query,
             topic="news",
             end_date=published_before.isoformat(),
@@ -70,11 +77,20 @@ class TavilyNewsClient:
         ]
 
     def extract(self, url: str) -> dict:
-        response = self._client.extract(url, extract_depth="advanced", format="text")
+        response = self._call(self._client.extract, url, extract_depth="advanced", format="text")
         results = response.get("results", [])
         if not results:
             raise NewsExtractError(f"Tavily could not extract content for {url}")
         return {"url": results[0].get("url", url), "text": results[0].get("raw_content")}
+
+    @staticmethod
+    def _call(fn, *args, **kwargs):
+        # The agent loop turns a raised tool into a tool-result error, so record a blocking one here.
+        try:
+            return fn(*args, **kwargs)
+        except _BLOCKING_ERRORS as exc:
+            blockers.record(SOURCE, f"{type(exc).__name__}: {exc}")
+            raise
 
 
 def search_news(

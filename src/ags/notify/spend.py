@@ -8,9 +8,30 @@ from ags.storage import Storage
 # token usage of every logged response. There is deliberately no second price table here.
 
 
+# Tavily credits per tool call, as an upper bound: a basic search is 1, an advanced extract is 2
+# per 5 URLs and the agent extracts one URL per call. A call answered from the PIT cache costs
+# nothing but is still counted.
+_TAVILY_CREDITS = {"search_news": 1, "fetch_document": 2}
+
+
 def _commodity(key: str) -> str:
     name = key.rsplit("/", 1)[-1]
-    return "portfolio" if key.startswith("portfolio/") else name.split("_", 1)[0]
+    return "portfolio" if "portfolio/" in key else name.split("_", 1)[0]
+
+
+def cycle_usage(storage: Storage, keys: list[str]) -> dict:
+    """LLM $ and Tavily credits spent by one cycle, from its run logs (`keys`; missing ones skipped)."""
+    cost, credits = 0.0, 0
+    for key in keys:
+        data = storage.get(key)
+        for line in (data or b"").decode().splitlines():
+            event = json.loads(line)
+            payload = event.get("payload") or {}
+            if event["event_type"] == "response":
+                cost += (payload.get("usage") or {}).get("cost_usd") or 0.0
+            elif event["event_type"] == "tool_call" and event["agent"] == "news":
+                credits += _TAVILY_CREDITS.get(payload.get("name"), 0)
+    return {"cost_usd": cost, "tavily_credits": credits}
 
 
 def _empty() -> dict:
@@ -25,7 +46,8 @@ def llm_spend(storage: Storage, *, now: datetime) -> dict:
     """
     windows = {"24h": _empty(), "mtd": _empty()}
     day_ago = now - timedelta(hours=24)
-    for key in storage.list("logs/") + storage.list("portfolio/logs/"):
+    # attempts/: the replaced attempts of retried runs, which spent money too (logging/attempts.py).
+    for key in storage.list("logs/") + storage.list("portfolio/logs/") + storage.list("attempts/"):
         for line in storage.get(key).decode().splitlines():
             event = json.loads(line)
             usage = (event.get("payload") or {}).get("usage") if event["event_type"] == "response" else None
