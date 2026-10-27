@@ -225,6 +225,7 @@ __marimo__/
 
 # Official-record mirror (pull-only) and unofficial local runs
 /portfolio/
+/attempts/
 /local/
 # Counterfactual replays: local copies of replays/{replay_id}/ plus report.csv and differences.md
 /replays/

@@ -89,3 +89,38 @@ def test_cycle_usage_sums_cost_and_counts_tavily_calls_from_the_cycles_logs(tmp_
     usage = cycle_usage(storage, ["logs/corn_x.jsonl", "logs/missing.jsonl", "portfolio/logs/cycle_x.jsonl"])
 
     assert usage == {"cost_usd": 0.75, "tavily_credits": 3}
+
+
+def test_daily_spend_is_one_row_per_utc_day_and_key_with_both_runs_of_a_day_together(tmp_path):
+    from ags.notify.spend import daily_spend
+
+    storage = LocalStorage(tmp_path)
+    # 04:00 ET (09:00Z) and 16:00 ET (21:00Z) runs of the same UTC day.
+    _log(storage, "logs/corn_2026-06-10T09-00-00Z.jsonl", _response("technical", "2026-06-10T09:00:05+00:00", 1.0))
+    _log(storage, "logs/corn_2026-06-10T21-00-00Z.jsonl", _response("technical", "2026-06-10T21:00:05+00:00", 2.0))
+    _log(storage, "logs/wheat_2026-06-10T21-00-00Z.jsonl", _response("coordinator", "2026-06-10T21:01:00+00:00", 0.5))
+    _log(storage, "portfolio/logs/cycle_2026-06-11T09-00-00Z.jsonl", _response("manager", "2026-06-11T09:05:00+00:00", 4.0))
+    _log(storage, "attempts/logs/corn_2026-06-11T09-00-00Z.attempt1.jsonl", _response("technical", "2026-06-11T09:00:05+00:00", 0.25))
+
+    by_agent = daily_spend(storage, by="agent")
+    by_commodity = daily_spend(storage, by="commodity")
+
+    assert sorted(by_agent, key=lambda r: (r["day"], r["key"])) == [
+        {"day": "2026-06-10", "key": "coordinator", "cost": 0.5},
+        {"day": "2026-06-10", "key": "technical", "cost": 3.0},
+        {"day": "2026-06-11", "key": "manager", "cost": 4.0},
+        {"day": "2026-06-11", "key": "technical", "cost": 0.25},
+    ]
+    assert {(r["day"], r["key"]): r["cost"] for r in by_commodity} == {
+        ("2026-06-10", "corn"): 3.0, ("2026-06-10", "wheat"): 0.5,
+        ("2026-06-11", "portfolio"): 4.0, ("2026-06-11", "corn"): 0.25,
+    }
+
+
+def test_daily_spend_leaves_out_unpriced_responses(tmp_path):
+    from ags.notify.spend import daily_spend
+
+    storage = LocalStorage(tmp_path)
+    _log(storage, "logs/corn_2026-06-10T09-00-00Z.jsonl", _response("technical", "2026-06-10T09:00:05+00:00", None))
+
+    assert daily_spend(storage, by="agent") == []

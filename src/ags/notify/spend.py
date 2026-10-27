@@ -1,6 +1,6 @@
 import json
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from ags.storage import Storage
 
@@ -91,3 +91,19 @@ def llm_spend(storage: Storage, *, now: datetime) -> dict:
             for name in member:
                 _add(windows[name], key, event, usage.get("cost_usd"))
     return {k: _plain(v) for k, v in windows.items()}
+
+
+def daily_spend(storage: Storage, *, by: str) -> list[dict]:
+    """LLM $ per UTC day and `by` ("agent" or "commodity"), from every priced response in the logs.
+
+    Retried attempts are included, like `llm_spend`; unpriced responses are left out.
+    """
+    totals: dict[tuple[str, str], float] = defaultdict(float)
+    for key in storage.list("logs/") + storage.list("portfolio/logs/") + storage.list("attempts/"):
+        for event, usage in _responses(storage, key):
+            cost = usage.get("cost_usd")
+            if cost is None:
+                continue
+            day = datetime.fromisoformat(event["timestamp"]).astimezone(timezone.utc).date().isoformat()
+            totals[(day, event["agent"] if by == "agent" else _commodity(key))] += cost
+    return [{"day": day, "key": name, "cost": cost} for (day, name), cost in totals.items()]
