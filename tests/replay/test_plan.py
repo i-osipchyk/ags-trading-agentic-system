@@ -24,3 +24,12 @@ def test_pending_cycles_are_the_official_ones_from_the_fork_with_a_book_file_and
     _cycle(store, "cycle_2026-10-20T08-00-00Z", prefix="replays/coord-v2/portfolio")  # already replayed
 
     assert pending_cycles(store, SPEC_OBJ) == ["cycle_2026-10-20T20-00-00Z", "cycle_2026-10-22T20-00-00Z"]
+
+
+def test_official_cycles_come_from_the_demo_managers_store_once_it_has_records(tmp_path):
+    store = LocalStorage(tmp_path)
+    _cycle(store, "cycle_2026-10-19T20-00-00Z")  # the paper manager's era
+    assert pending_cycles(store, SPEC_OBJ) == []
+    store.put("portfolio/demo/manager/cycles/cycle_2026-10-21T10-00-00Z.json", b"{}")
+
+    assert pending_cycles(store, SPEC_OBJ) == ["cycle_2026-10-21T10-00-00Z"]

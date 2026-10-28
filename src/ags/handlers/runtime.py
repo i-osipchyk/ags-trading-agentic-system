@@ -37,6 +37,7 @@ class Runtime:
     # Provider balances for the low-credit check ({} when unknown, as in tests).
     balances: Callable[[], dict] = lambda: {}
     min_cycles_of_credit: int = DEFAULT_MIN_CYCLES_OF_CREDIT
+    trading_gateway: Callable[[], object] | None = None  # connects to the demo account on first call
 
 
 def retry_window_from(env) -> timedelta:
@@ -68,7 +69,22 @@ def check_late_start(event: dict, now: datetime, *, retry_window: timedelta | No
         )
 
 
-def build_runtime(env, *, config: Config, ssm_client, chat_factory, market_factory, alert_factory=None) -> Runtime:
+def lazy(make: Callable[[], object]) -> Callable[[], object]:
+    """Call `make` once, on first use, and hand the same object back after that."""
+    box: list = []
+
+    def get():
+        if not box:
+            box.append(make())
+        return box[0]
+
+    get.made = lambda: box[0] if box else None  # type: ignore[attr-defined]
+    return get
+
+
+def build_runtime(
+    env, *, config: Config, ssm_client, chat_factory, market_factory, alert_factory=None, trading_factory=None
+) -> Runtime:
     """Wire a Lambda's dependencies. The real clients are passed in as factories so tests never connect out."""
     param = env["AGS_BREAKER_PARAM"]
 
@@ -86,4 +102,5 @@ def build_runtime(env, *, config: Config, ssm_client, chat_factory, market_facto
         breaker_reset_at=breaker_reset_at, alert=alert_factory(config) if alert_factory else (lambda message: None),
         retry_window=retry_window_from(env), balances=lambda: provider_balances(config),
         min_cycles_of_credit=int(env.get("MIN_CYCLES_OF_CREDIT") or DEFAULT_MIN_CYCLES_OF_CREDIT),
+        trading_gateway=lazy(lambda: trading_factory(config)) if trading_factory else None,
     )

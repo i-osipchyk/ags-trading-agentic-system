@@ -1,7 +1,7 @@
 import asyncio
 import json
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ags.agents.coordinator import run_coordinator
@@ -15,7 +15,7 @@ from ags.logging.run_id import generate_run_id
 from ags.logging.run_log import RunLog
 from ags.storage import LocalStorage, as_storage
 from ags.tools.pit_store import ET
-from ags.tools.sources.prices import get_prices
+from ags.tools.sources.prices import LIVE_CYCLE_MAX_AGE, get_prices, get_quote
 from ags.tools.track_record import read_track_record
 
 
@@ -80,9 +80,35 @@ class LoggingChatClient:
         self._run_log.append(agent=self._agent, event_type=event_type, payload=payload)
 
 
-def _price_at_call(data_dir: Path, commodity: str, as_of: datetime, prices_client) -> dict | None:
-    # Deterministic fact, stamped by code — never asked of the model. A week
-    # lookback spans weekends/holidays so the latest trading close is found.
+def _reference_quote(data_dir, commodity: str, as_of: datetime, prices_client, now: datetime) -> dict | None:
+    """The intraday bid/ask when the cycle starts, stamped by code. None if unavailable or not a live cycle."""
+    if now - as_of > LIVE_CYCLE_MAX_AGE:
+        return None
+    try:
+        quote = get_quote(data_dir, commodity=commodity, as_of=now, client=prices_client, now=now)
+    except Exception:
+        return None
+    if not quote or not (quote.get("bid") and quote.get("ask")):
+        return None
+    return {
+        "kind": "intraday_quote", "bid": quote["bid"], "ask": quote["ask"], "price": (quote["bid"] + quote["ask"]) / 2,
+        "quote_timestamp": quote["timestamp"], "captured_at": now.isoformat(),
+    }
+
+
+def _price_at_call(data_dir: Path, commodity: str, as_of: datetime, prices_client, reference: dict | None = None) -> dict | None:
+    """The price the call is graded from: the intraday reference quote if there is one, else the last close.
+
+    Deterministic fact, stamped by code — never asked of the model.
+    """
+    close = _last_close(data_dir, commodity, as_of, prices_client)
+    if reference is None:
+        return None if close is None else {**close, "kind": "daily_close"}
+    return {**reference, "date": as_of.astimezone(ET).date().isoformat(), "last_close": close}
+
+
+def _last_close(data_dir: Path, commodity: str, as_of: datetime, prices_client) -> dict | None:
+    # A week lookback spans weekends/holidays so the latest trading close is found.
     try:
         bars = get_prices(
             data_dir, commodity=commodity, start=as_of.astimezone(ET).date() - timedelta(days=7),
@@ -112,7 +138,9 @@ def run_pipeline(
     weather_client=None,
     usda_client=None,
     replace_log: bool = False,
+    now: datetime | None = None,
 ) -> dict:
+    now = now or datetime.now(timezone.utc)
     run_id = generate_run_id(commodity, trigger_timestamp)
     log_store = as_storage(log_dir)
     # Non-local backends buffer the log and upload once; the finally below
@@ -122,13 +150,14 @@ def run_pipeline(
     try:
         with trace(chat_client, run_id):
             return _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
-                        log_store, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client)
+                        log_store, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, now)
     finally:
         raw_log.close()
 
 
 def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
-         log_dir, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client) -> dict:
+         log_dir, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, now) -> dict:
+    reference = _reference_quote(data_dir, commodity, as_of, prices_client, now)
     run_log = _SharedRunLog(raw_log)
     common = {"commodity": commodity, "as_of": as_of, "model": model}
 
@@ -137,7 +166,7 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
 
     analysts = {
         "technical": lambda: run_technical_analyst(
-            data_dir, _client("technical"), prices_client=prices_client, **common
+            data_dir, _client("technical"), prices_client=prices_client, reference_quote=reference, now=now, **common
         ),
         "news": (
             (lambda: run_news_analyst(data_dir, _client("news"), news_client=news_client, **common))
@@ -184,7 +213,7 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
             as_of=as_of,
             model=model,
             analyst_outputs=outputs,
-            price_at_call=_price_at_call(data_dir, commodity, as_of, prices_client),
+            price_at_call=_price_at_call(data_dir, commodity, as_of, prices_client, reference),
             track_record=track_record,
         )
     except Exception as exc:

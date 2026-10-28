@@ -153,3 +153,23 @@ def test_local_blank_dotenv_ctrader_values_are_filled_from_ssm(local, monkeypatc
     load_env(local)
 
     assert os.environ["CTRADER_ACCESS_TOKEN"] == "access"
+
+def test_the_trading_account_defaults_to_the_projects_cTrader_account_and_can_be_overridden(monkeypatch):
+    env = {k: "x" for k in ("DEEPSEEK_API_KEY", "CTRADER_CLIENT_ID", "CTRADER_CLIENT_SECRET", "CTRADER_ACCESS_TOKEN", "TAVILY_API_KEY")}
+    env["CTRADER_ACCOUNT_ID"] = "123"
+
+    assert Config.from_mapping(env).ctrader_trading_account_id == 123
+    assert Config.from_mapping({**env, "CTRADER_TRADING_ACCOUNT_ID": "456"}).ctrader_trading_account_id == 456
+
+
+def test_demo_accounts_use_the_demo_host_for_market_data_too():
+    from ctrader_open_api import EndPoints
+
+    from ags.tools.sources.prices import protobuf_host
+
+    env = {k: "x" for k in ("DEEPSEEK_API_KEY", "CTRADER_CLIENT_ID", "CTRADER_CLIENT_SECRET", "CTRADER_ACCESS_TOKEN", "TAVILY_API_KEY")}
+    env["CTRADER_ACCOUNT_ID"] = "123"
+
+    assert protobuf_host(Config.from_mapping(env)) == EndPoints.PROTOBUF_LIVE_HOST
+    assert protobuf_host(Config.from_mapping({**env, "CTRADER_DEMO": "true"})) == EndPoints.PROTOBUF_DEMO_HOST
+    assert protobuf_host(Config.from_mapping({**env, "CTRADER_DEMO": "true"}), live=True) == EndPoints.PROTOBUF_LIVE_HOST

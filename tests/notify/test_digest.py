@@ -32,7 +32,7 @@ def _cycle(storage, book, cycle_id, *, equity=10_000.0, used_margin=0.0, positio
     held = [{"symbol_name": c, "trade_side": "BUY" if n > 0 else "SELL", "volume": int(abs(n) * 10_000)}
             for c, n in positions if n]
     storage.put(f"portfolio/{book}/cycles/{cycle_id}.json", json.dumps({
-        "cycle_id": cycle_id, "as_of": as_of.isoformat(), "equity": equity, "used_margin": used_margin,
+        "cycle_id": cycle_id, "as_of": as_of.isoformat(), "equity": equity, "opening_equity": 10_000.0, "used_margin": used_margin,
         "free_margin": equity - used_margin, "closing_lots": lots,
         "closing_state": {"positions": held, "marks": marks or {}},
         "calls": calls or {c: {"call": "neutral", "conviction": 1} for c in COMMODITIES},
@@ -162,7 +162,7 @@ def test_book_ends_with_the_manager_minus_shadow_gap_and_its_change(tmp_path):
     _books(storage)
 
     # Now 10,212.40 − 10,077.20; previously 10,164.30 − 10,064.80 = 99.50.
-    assert _section(compose_digest(storage, now=NOW), "Book")[-1] == "Manager − shadow: +$135.20 (+$35.70)"
+    assert _section(compose_digest(storage, now=NOW), "Book")[-1] == "Manager − shadow since 2026-06-10: +$135.20 (+$35.70)"
 
 
 def _calls(**overrides):
@@ -197,7 +197,7 @@ def test_the_first_cycle_shows_no_changes_since_there_is_nothing_to_compare_with
 
     assert _block(text, "Book", "Manager:")[1] == "- Equity $10,000.00"
     assert _block(text, "Book", "Manager:")[5] == "- Corn +1.0 | $4,310.00"
-    assert _section(text, "Book")[-1] == "Manager − shadow: $0.00"
+    assert _section(text, "Book")[-1] == "Manager − shadow since 2026-06-10: $0.00"
     assert _section(text, "Latest calls")[1] == "- Corn: neutral 1"
 
 
@@ -249,7 +249,7 @@ By commodity:
 - Cotton 0 (0) | $0.00 ($0.00)
 - Cocoa 0 (0) | $0.00 ($0.00)
 
-Manager − shadow: +$135.20 (+$35.70)
+Manager − shadow since 2026-06-10: +$135.20 (+$35.70)
 
 <b><u>Latest calls</u></b>
 - Corn: bullish 4 (was neutral 1)
@@ -271,3 +271,21 @@ def test_digest_matches_the_golden_text(tmp_path):
     _log(storage, "portfolio/logs/cycle_2026-06-10T20-00-00Z.jsonl", _response("manager", "2026-06-10T20:05:00+00:00", 0.25))
 
     assert compose_digest(storage, now=NOW) == GOLDEN
+
+
+def test_the_digest_reads_the_demo_managers_store_and_measures_the_gap_since_its_first_cycle(tmp_path):
+    storage = LocalStorage(tmp_path)
+    # The shadow has been running since 10k and is at 10_500 when the demo manager starts at its own 10k.
+    _cycle(storage, "shadow", PREVIOUS, equity=10_500.0)
+    _cycle(storage, "demo/manager", PREVIOUS, equity=10_020.0)
+    _cycle(storage, "shadow", CYCLE, equity=10_560.0)
+    _cycle(storage, "demo/manager", CYCLE, equity=10_030.0)
+    # shadow's opening equity at the manager's first cycle is 10_500, not 10_000
+    for key in storage.list("portfolio/shadow/cycles/"):
+        record = json.loads(storage.get(key))
+        record["opening_equity"] = 10_500.0
+        storage.put(key, json.dumps(record).encode())
+
+    text = compose_digest(storage, now=NOW, manager_store="demo/manager")
+
+    assert _section(text, "Book")[-1] == "Manager − shadow since 2026-06-10: −$30.00 (−$50.00)"

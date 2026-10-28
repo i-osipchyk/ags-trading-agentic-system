@@ -98,6 +98,9 @@ def parse_symbol_specs(symbol, leverage) -> dict:
         "pip_position": symbol.pipPosition,
         "margin_rate": 1 / tiers[0]["leverage"],
         "leverage_tiers": tiers,
+        # Trading sessions: seconds from Sunday 00:00 in `schedule_timezone`, as cTrader sends them.
+        "schedule_timezone": symbol.scheduleTimeZone,
+        "schedule": [[i.startSecond, i.endSecond] for i in symbol.schedule],
     }
 
 
@@ -122,6 +125,13 @@ def parse_quote(event) -> dict:
     }
 
 
+def protobuf_host(config: Config, *, live: bool | None = None) -> str:
+    """Demo accounts must connect to the demo host (CTRADER_DEMO=true); otherwise the live one."""
+    if live is None:
+        live = not config.ctrader_demo
+    return EndPoints.PROTOBUF_LIVE_HOST if live else EndPoints.PROTOBUF_DEMO_HOST
+
+
 class CTraderPricesClient:
     """Synchronous facade over the Twisted/crochet cTrader Open API client.
 
@@ -132,12 +142,13 @@ class CTraderPricesClient:
     underlying SDK exposes.
     """
 
-    def __init__(self, config: Config, *, live: bool = True, timeout: int = 30):
+    def __init__(self, config: Config, *, live: bool | None = None, timeout: int = 30):
         crochet.setup()
         self._config = config
         self._timeout = timeout
         self._symbol_ids: dict[str, int] = {}
-        host = EndPoints.PROTOBUF_LIVE_HOST if live else EndPoints.PROTOBUF_DEMO_HOST
+        host = protobuf_host(config, live=live)
+        self._host = host
         self._client = Client(host, EndPoints.PROTOBUF_PORT, TcpProtocol)
         self._client.setConnectedCallback(self._on_connected)
         self._client.setMessageReceivedCallback(self._on_message)
@@ -195,7 +206,17 @@ class CTraderPricesClient:
             self._client.startService()
             return self._pending
 
-        _do()
+        try:
+            _do()
+        except CTraderApiError as exc:
+            if "CANT_ROUTE_REQUEST" in str(exc):
+                kind = "demo" if self._host == EndPoints.PROTOBUF_DEMO_HOST else "live"
+                raise CTraderApiError(
+                    f"{exc}. Account {self._config.ctrader_account_id} is not hosted on the {kind} server "
+                    f"({self._host}). Demo accounts need CTRADER_DEMO=true; live accounts need it unset "
+                    f"(currently {'true' if self._config.ctrader_demo else 'unset'})."
+                ) from exc
+            raise
 
     def _symbol_id(self, symbol_name: str) -> int:
         if not self._symbol_ids:
@@ -276,9 +297,12 @@ class CTraderPricesClient:
         return _do()
 
     def get_h1_bars(self, symbol_name: str, start: datetime, end: datetime) -> list[dict]:
+        return self.get_bars(symbol_name, "H1", start, end)
+
+    def get_bars(self, symbol_name: str, tf: str, start: datetime, end: datetime) -> list[dict]:
         request = ProtoOAGetTrendbarsReq(
             ctidTraderAccountId=self._config.ctrader_account_id,
-            period=ProtoOATrendbarPeriod.H1,
+            period=ProtoOATrendbarPeriod.Value(tf),
             symbolId=self._symbol_id(symbol_name),
             fromTimestamp=int(start.timestamp() * 1000),
             toTimestamp=int(end.timestamp() * 1000),
@@ -458,7 +482,14 @@ def get_quote(
     return quote
 
 
+# Lower timeframes a caller may ask for, with the bar length in seconds. All align to the UTC clock
+# (quarter, half and full hours), so a bar's end is a plain floor of the cutoff.
+INTRADAY_TIMEFRAMES = {"M15": 900, "M30": 1800, "H1": 3600}
+# A cycle whose scheduled time is at most this old is live; an older one is a replay and never fetches.
+LIVE_CYCLE_MAX_AGE = timedelta(hours=1)
 H1_REPORT = "h1_bars"
+# Longest look-back per timeframe, in days, so one request stays a sensible size.
+INTRADAY_MAX_DAYS = {"M15": 14, "M30": 30, "H1": 60}
 
 
 def get_h1_bars(
@@ -472,39 +503,82 @@ def get_h1_bars(
     now: datetime | None = None,
     fetch: bool = True,
 ) -> list[dict]:
-    """Completed H1 bars with open time in [start, end), as known at `as_of`.
+    """Completed H1 bars with open time in [start, end), as known at `as_of` (see `get_intraday_bars`)."""
+    return get_intraday_bars(
+        data_dir, commodity=commodity, tf="H1", start=start, end=end, as_of=as_of, client=client, now=now,
+        fetch=fetch,
+    )
 
-    `fetch=False` only reads what is already stored (a counterfactual replay).
+
+def get_intraday_bars(
+    data_dir: Path,
+    *,
+    commodity: str,
+    tf: str,
+    start: datetime,
+    end: datetime,
+    as_of: datetime,
+    client: MarketDataClient | None = None,
+    now: datetime | None = None,
+    fetch: bool = True,
+) -> list[dict]:
+    """Completed `tf` (M15, M30 or H1) bars with open time in [start, end), as known at `as_of`.
 
     Each live fetch is stored PIT under its capture instant, along with how far
-    it covers; a call only fetches the hours after what earlier captures
-    already cover. A bar is returned only once its hour has closed, and only
-    from captures made at or before `as_of`.
+    it covers; a call only fetches the periods after what earlier captures
+    already cover. A bar is returned only once its period has closed, and only
+    from captures made at or before `as_of`. `fetch=False` (a replay) only reads what was captured.
     """
+    if tf not in INTRADAY_TIMEFRAMES:
+        raise ValueError(f"unsupported timeframe {tf!r}; use one of {', '.join(INTRADAY_TIMEFRAMES)}")
+    seconds = INTRADAY_TIMEFRAMES[tf]
+    report = H1_REPORT if tf == "H1" else f"{tf.lower()}_bars"
     if as_of.tzinfo is None:
         raise ValueError("as_of must be timezone-aware")
     now = now or datetime.now(timezone.utc)
     cutoff = min(as_of, now)
-    horizon = cutoff.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    horizon = datetime.fromtimestamp(int(cutoff.timestamp()) // seconds * seconds, tz=timezone.utc)
 
     store = as_storage(data_dir)
-    prefix = f"{SOURCE}/{H1_REPORT}/{commodity}/"
+    prefix = f"{SOURCE}/{report}/{commodity}/"
     captures = [json.loads(store.get(key)) for key in store.list(prefix) if key.endswith(".json")]
     captures = [c for c in captures if datetime.fromisoformat(c["captured_at"]) <= cutoff]
     covered = max((datetime.fromisoformat(c["covers_until"]) for c in captures), default=None)
+    # Where the earliest capture begins: a caller may ask for a longer look-back than any before it.
+    starts = [datetime.fromisoformat(c["covers_from"]) for c in captures if "covers_from" in c]
+    covered_from = min(starts, default=None)
 
-    if fetch and as_of >= now and (covered is None or covered < horizon):
+    if fetch and as_of >= now:
+        symbol = CTRADER_SYMBOL_NAMES[commodity]
         owns_client = client is None
         if client is None:
             client = CTraderPricesClient(Config.from_env())
+
+        def fetch(frm: datetime, to: datetime) -> None:
+            if tf == "H1":
+                fetched = client.get_h1_bars(symbol, frm, to)
+            else:
+                fetched = client.get_bars(symbol, tf, frm, to)
+            capture = {
+                "captured_at": now.isoformat(), "covers_from": frm.isoformat(), "covers_until": to.isoformat(),
+                "bars": fetched,
+            }
+            write_pit(data_dir, source=SOURCE, report=report, symbol=commodity, release_date=now, content=capture)
+            captures.append(capture)
+
         try:
-            fetched = client.get_h1_bars(CTRADER_SYMBOL_NAMES[commodity], covered or start, horizon)
+            newer = covered is None or covered < horizon
+            older = covered_from is not None and start < covered_from  # a longer look-back than before
+            # One capture per call: its storage key is the capture instant.
+            if newer and older:
+                fetch(start, horizon)
+            elif newer:
+                fetch(covered or start, horizon)
+            elif older:
+                fetch(start, covered_from)
         finally:
             if owns_client:
                 client.close()
-        capture = {"captured_at": now.isoformat(), "covers_until": horizon.isoformat(), "bars": fetched}
-        write_pit(data_dir, source=SOURCE, report=H1_REPORT, symbol=commodity, release_date=now, content=capture)
-        captures.append(capture)
 
     by_open = {b["timestamp"]: b for c in captures for b in c["bars"]}
     return [

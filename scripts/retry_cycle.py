@@ -12,7 +12,7 @@ checks the same things first, so a retry that would abort spends nothing: the sl
 attempted, isn't in the book yet, no cycle is running, and the window is still open.
 
 Usage: uv run python scripts/retry_cycle.py [--env live] [--slot 2026-10-26T20:00:00Z]
-       (default slot: the latest 04:00/16:00 ET weekday slot at or before now)
+       (default slot: the latest 06:00/12:30 ET weekday slot at or before now)
 """
 
 import argparse
@@ -23,18 +23,20 @@ from zoneinfo import ZoneInfo
 
 PROJECT = "ags"
 ET = ZoneInfo("America/New_York")
-SLOT_HOURS = (16, 4)  # the cycle schedule, cron(0 4,16 ? * MON-FRI *) in New York time
+# The cycle schedules, in New York time, latest first: cron(0 6 ? * MON-FRI *) and cron(30 12 ? * MON-FRI *).
+SLOTS = ((12, 30), (6, 0))
+SCHEDULE = "cycle-morning"  # either schedule names the same state machine
 
 
 def latest_slot(now: datetime) -> datetime:
     """The latest scheduled slot at or before `now`, in UTC."""
     local = now.astimezone(ET)
-    for days in range(5):  # Monday 03:00 ET reaches back to Friday 16:00
+    for days in range(5):  # Monday 05:00 ET reaches back to Friday 12:30
         day = (local - timedelta(days=days)).date()
         if day.weekday() >= 5:
             continue
-        for hour in SLOT_HOURS:
-            slot = datetime.combine(day, time(hour), tzinfo=ET)
+        for hour, minute in SLOTS:
+            slot = datetime.combine(day, time(hour, minute), tzinfo=ET)
             if slot <= local:
                 return slot.astimezone(timezone.utc)
     raise ValueError(f"no cycle slot in the 5 days before {now}")
@@ -72,7 +74,9 @@ def main(argv: list[str] | None = None, *, scheduler=None, lambda_=None, sfn=Non
         storage = S3Storage(env["AGS_BUCKET"])
     window = retry_window_from(env)
 
-    if storage.get(f"portfolio/manager/cycles/{cycle_id}.json") is not None:
+    from ags.portfolio.stores import manager_store
+
+    if storage.get(f"portfolio/{manager_store(env.get('MANAGER_BOOK', 'paper'))}/cycles/{cycle_id}.json") is not None:
         raise SystemExit(f"{cycle_id} is already in the book; nothing to retry")
     if storage.get(f"portfolio/logs/{cycle_id}.jsonl") is None:
         raise SystemExit(
@@ -81,12 +85,12 @@ def main(argv: list[str] | None = None, *, scheduler=None, lambda_=None, sfn=Non
         )
     if now - slot > window:
         raise SystemExit(f"{cycle_id}: the {window} retry window closed at {slot + window:%Y-%m-%d %H:%M} UTC")
-    arn = scheduler.get_schedule(GroupName=group, Name="cycle")["Target"]["Arn"]
+    arn = scheduler.get_schedule(GroupName=group, Name=SCHEDULE)["Target"]["Arn"]
     if sfn.list_executions(stateMachineArn=arn, statusFilter="RUNNING", maxResults=1)["executions"]:
         raise SystemExit("a cycle is still running; retry once it has finished")
 
     name = f"retry-{cycle_id}-{now:%H%M%S}"
-    payload = json.dumps({"scheduled_time": when, "off_schedule": False})
+    payload = json.dumps({"scheduled_time": when})
     sfn.start_execution(stateMachineArn=arn, name=name, input=payload)
     print(f"started {name} on {arn}")
     print(f"input: {payload}; must start by {slot + window:%Y-%m-%d %H:%M} UTC")

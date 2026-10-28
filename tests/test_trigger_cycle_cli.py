@@ -4,10 +4,10 @@ import pytest
 
 from scripts import trigger_cycle
 
-INPUT = '{"scheduled_time": "<aws.scheduler.scheduled-time>", "off_schedule": false}'
+INPUT = '{"scheduled_time": "<aws.scheduler.scheduled-time>"}'
 CYCLE = {
-    "Name": "cycle", "GroupName": "ags-live",
-    "ScheduleExpression": "cron(0 4,16 ? * MON-FRI *)", "ScheduleExpressionTimezone": "America/New_York",
+    "Name": "cycle-morning", "GroupName": "ags-live",
+    "ScheduleExpression": "cron(0 6 ? * MON-FRI *)", "ScheduleExpressionTimezone": "America/New_York",
     "Target": {
         "Arn": "arn:aws:states:eu-west-1:1:stateMachine:ags-live-cycle",
         "RoleArn": "arn:aws:iam::1:role/ags-live-cycle-scheduler",
@@ -23,7 +23,7 @@ class FakeScheduler:
         self.cycle, self.created = cycle, []
 
     def get_schedule(self, *, GroupName, Name):
-        assert (GroupName, Name) == ("ags-live", "cycle")
+        assert (GroupName, Name) == ("ags-live", "cycle-morning")
         return self.cycle
 
     def create_schedule(self, **request):
@@ -36,8 +36,8 @@ def test_fires_once_through_scheduler_with_the_cycle_schedules_target_verbatim(c
     trigger_cycle.main([], scheduler=scheduler, now=NOW)
 
     [request] = scheduler.created
-    # Same target and input as the scheduled cycle: Scheduler substitutes the placeholder, and
-    # off_schedule stays false, so the run writes the books like any 04:00/16:00 cycle.
+    # Same target and input as the scheduled cycle: Scheduler substitutes the placeholder, so the run
+    # writes the books and trades like any 06:00/12:30 cycle.
     assert request["Target"] == CYCLE["Target"]
     assert request["GroupName"] == "ags-live"
     assert request["ScheduleExpression"] == "at(2026-10-14T09:32:00)"

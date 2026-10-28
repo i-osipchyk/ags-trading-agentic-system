@@ -3,13 +3,18 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+from ags.portfolio.stores import active_manager_store
 from ags.storage import Storage
 from ags.tools.sources.prices import CTRADER_SYMBOL_NAMES
 
 
 def load_cycles(storage: Storage, book: str, *, now: datetime, days: int | None = None) -> pd.DataFrame:
-    """Cycle files of one book, oldest first, with their `as_of` as a UTC `at` column; `days` keeps the last N."""
-    records = [json.loads(storage.get(k)) for k in storage.list(f"portfolio/{book}/cycles/")]
+    """Cycle files of one book, oldest first, with their `as_of` as a UTC `at` column; `days` keeps the last N.
+
+    `book` is "manager" or "shadow"; "manager" is whichever manager store is in use (the demo one once it has records).
+    """
+    store = active_manager_store(storage) if book == "manager" else book
+    records = [json.loads(storage.get(k)) for k in storage.list(f"portfolio/{store}/cycles/")]
     frame = pd.DataFrame(records, columns=None if records else ["at"])
     if frame.empty:
         return frame
@@ -38,10 +43,22 @@ def equity_frame(storage: Storage, *, now: datetime, days: int | None = None) ->
     if manager.empty or shadow.empty:
         return pd.DataFrame(columns=["at", "manager", "shadow", "gap"])
     joined = manager.merge(shadow, on="cycle_id", suffixes=("_m", "_s"))
+    # The gap is each book's change since the manager's first cycle, so a manager that started later
+    # (the demo one, from its own capital) is compared with the shadow over the same stretch.
+    offset = _first_gap(storage, now)
     return pd.DataFrame({
         "at": joined["at_m"], "manager": joined["equity_m"], "shadow": joined["equity_s"],
-        "gap": joined["equity_m"] - joined["equity_s"],
+        "gap": joined["equity_m"] - joined["equity_s"] - offset,
     })
+
+
+def _first_gap(storage: Storage, now: datetime) -> float:
+    """Manager minus shadow opening equity at the manager's first shared cycle (0 when unknown)."""
+    manager, shadow = (load_cycles(storage, b, now=now) for b in ("manager", "shadow"))
+    if manager.empty or shadow.empty or "opening_equity" not in manager or "opening_equity" not in shadow:
+        return 0.0
+    joined = manager.merge(shadow, on="cycle_id", suffixes=("_m", "_s"))
+    return 0.0 if joined.empty else float(joined.iloc[0]["opening_equity_m"] - joined.iloc[0]["opening_equity_s"])
 
 
 COMMODITIES = list(CTRADER_SYMBOL_NAMES)

@@ -156,6 +156,17 @@ def _result(price_at_call: dict | None, *, degraded: bool = False, **fields) -> 
     }
 
 
+def _price_note(price_at_call: dict | None) -> str:
+    if not price_at_call:
+        return ""
+    if price_at_call.get("kind") == "intraday_quote":
+        return (
+            f"\n\nPrice at call: INTRADAY mid {price_at_call['price']:.5g}, a live quote captured "
+            f"{price_at_call['captured_at']}. Your call is graded from this price, not from a daily close."
+        )
+    return f"\n\nPrice at call: {price_at_call['price']} (last daily close, {price_at_call['date']}; no live quote)."
+
+
 def run_coordinator(
     chat_client: ChatClient,
     *,
@@ -170,6 +181,7 @@ def run_coordinator(
     user_prompt = (
         f"Analyst outputs for {commodity} as of {as_of.isoformat()}:\n"
         + json.dumps(analyst_outputs, indent=2, default=str)
+        + _price_note(price_at_call)
     )
 
     tools = []

@@ -12,6 +12,7 @@ class GuardrailConfig:
     gross_leverage_cap: float
     margin_buffer: float
     min_resize_fraction: float
+    drift_limit_atr: float = 0.5  # price moved this many ATRs since the call was priced: no new exposure
 
 
 def _valid_deltas(proposal, symbols) -> dict | None:
@@ -40,10 +41,12 @@ def apply_guardrails(
     risk: dict,
     config: GuardrailConfig,
     breaker_active: bool,
+    drift: dict[str, float | None] | None = None,
 ) -> tuple[dict[str, float], list[dict]]:
     """Clamp a manager proposal to the rules in DESIGN.md. Pure: no I/O.
 
-    `book_state` is `{"equity": float, "lots": {symbol: signed lots}}`. Returns
+    `book_state` is `{"equity": float, "lots": {symbol: signed lots}}`. `drift` is each symbol's price
+    move, in ATRs, from the call's reference quote to the execution quote (None when unknown). Returns
     the delta (in lots) to apply per symbol, and the violations found.
     """
     current = dict(book_state["lots"])
@@ -81,6 +84,12 @@ def apply_guardrails(
             clamp("direction", s, 0.0, "bullish call cannot end short; clamped to flat")
         elif call["call"] == "bearish" and target[s] > 0:
             clamp("direction", s, 0.0, "bearish call cannot end long; clamped to flat")
+
+    # 10. stale call: the price moved a lot since the call was priced, so no leg may add exposure
+    for s in symbols:
+        moved = (drift or {}).get(s)
+        if moved is not None and abs(moved) > config.drift_limit_atr and abs(target[s]) > abs(current[s]) + _EPS:
+            clamp("drift", s, current[s], f"price moved {moved:+.2f} ATR since the call; leg held, no new exposure")
 
     # 3. per-commodity cap
     equity = book_state["equity"]

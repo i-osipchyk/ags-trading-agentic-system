@@ -1,7 +1,7 @@
 """CLI: one full local cycle — the seven commodity pipelines, then the portfolio stage.
 
 Writes into the unofficial `local/` namespace only (official runs come from the
-scheduled AWS cycle). `--off-schedule` logs the portfolio stage but writes neither book.
+scheduled AWS cycle). A local run never trades: it has no S3 demo record and no broker connection, so its manager stays on the paper book.
 A breaker reset is read from `local/breaker_reset_at` (an ISO timestamp), if present.
 """
 
@@ -49,7 +49,6 @@ def _breaker_reset_at() -> datetime | None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run all seven pipelines and the portfolio stage into local/.")
-    parser.add_argument("--off-schedule", action="store_true", help="log the portfolio stage but write no cycle files")
     args = parser.parse_args(argv)
 
     config = Config.from_env()
@@ -71,7 +70,7 @@ def main(argv: list[str] | None = None) -> None:
         cycle = run_portfolio(
             "cycle_" + now.strftime("%Y-%m-%dT%H-%M-%SZ"), calls, storage, as_of=now, now=now,
             chat_client=chat_client, model=config.deepseek_model, market_client=market,
-            config=_portfolio_config(), breaker_reset_at=_breaker_reset_at, off_schedule=args.off_schedule,
+            config=_portfolio_config(), breaker_reset_at=_breaker_reset_at,
         )
     finally:
         market.close()

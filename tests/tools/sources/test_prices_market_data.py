@@ -38,6 +38,8 @@ def test_symbol_specs_are_flattened_to_plain_values_with_margin_rate_from_levera
         # 20:1 on the first tier (leverage is sent in cents of a ratio)
         "margin_rate": 0.05,
         "leverage_tiers": [{"volume": 0, "leverage": 20.0}, {"volume": 10_000_000, "leverage": 10.0}],
+        "schedule_timezone": "",
+        "schedule": [],
     }
 
 
@@ -249,3 +251,63 @@ def test_h1_trendbar_is_decoded_with_its_open_instant():
         "close": 4.5125,
         "volume": 77,
     }
+
+
+# --- other lower timeframes ---
+
+import pytest  # noqa: E402
+
+from ags.tools.sources.prices import get_intraday_bars  # noqa: E402
+
+
+class BarsClient:
+    """Serves 15-minute bars from 14:00 to 17:45 UTC; records every request."""
+
+    def __init__(self):
+        self.calls = []
+        self.bars = [
+            {"timestamp": datetime(2026, 1, 6, 14 + i // 4, 15 * (i % 4), tzinfo=timezone.utc).isoformat(),
+             "open": 4.5, "high": 4.6, "low": 4.4, "close": 4.55, "volume": 1}
+            for i in range(16)
+        ]
+
+    def get_bars(self, symbol_name, tf, start, end):
+        self.calls.append((tf, start, end))
+        return [b for b in self.bars if start <= datetime.fromisoformat(b["timestamp"]) < end]
+
+
+def test_quarter_hour_bars_exclude_the_bar_still_forming():
+    import tempfile
+    from pathlib import Path
+
+    now = datetime(2026, 1, 6, 16, 20, tzinfo=timezone.utc)  # the 16:15 bar is still forming
+    with tempfile.TemporaryDirectory() as d:
+        bars = get_intraday_bars(
+            Path(d), commodity="corn", tf="M15", start=datetime(2026, 1, 6, 15, tzinfo=timezone.utc),
+            end=datetime(2026, 1, 6, 18, tzinfo=timezone.utc), as_of=now, client=BarsClient(), now=now,
+        )
+    assert [b["timestamp"][11:16] for b in bars] == ["15:00", "15:15", "15:30", "15:45", "16:00"]
+
+
+def test_an_unsupported_timeframe_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="unsupported timeframe"):
+        get_intraday_bars(
+            tmp_path, commodity="corn", tf="M5", start=datetime(2026, 1, 6, tzinfo=timezone.utc),
+            end=datetime(2026, 1, 7, tzinfo=timezone.utc), as_of=datetime(2026, 1, 7, tzinfo=timezone.utc),
+            client=BarsClient(), now=datetime(2026, 1, 7, tzinfo=timezone.utc),
+        )
+
+
+def test_a_longer_lookback_than_an_earlier_call_backfills_instead_of_silently_returning_less(tmp_path):
+    client = BarsClient()
+    t = datetime(2026, 1, 6, 18, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 1, 6, 19, tzinfo=timezone.utc)
+    kwargs = dict(commodity="corn", tf="M15", end=end, as_of=t, client=client, now=t)
+    short = get_intraday_bars(tmp_path, start=datetime(2026, 1, 6, 17, tzinfo=timezone.utc), **kwargs)
+    t2 = datetime(2026, 1, 6, 18, 5, tzinfo=timezone.utc)
+    kwargs.update(as_of=t2, now=t2)
+
+    longer = get_intraday_bars(tmp_path, start=datetime(2026, 1, 6, 15, tzinfo=timezone.utc), **kwargs)
+
+    assert len(short) == 4 and len(longer) == 12  # 15:00..17:45
+    assert client.calls[1][1:] == (datetime(2026, 1, 6, 15, tzinfo=timezone.utc), datetime(2026, 1, 6, 17, tzinfo=timezone.utc))

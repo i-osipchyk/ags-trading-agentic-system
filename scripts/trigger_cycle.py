@@ -1,10 +1,10 @@
-"""CLI: fire one cycle on AWS now, through exactly the path the 04:00/16:00 ET cycles take.
+"""CLI: fire one cycle on AWS now, through exactly the path the 06:00/12:30 ET cycles take.
 
 Creates a one-time EventBridge Scheduler schedule a couple of minutes ahead, in the same group,
-with the deployed `cycle` schedule's target copied verbatim: same state machine, role, retry
+with the deployed `cycle-morning` schedule's target copied verbatim: same state machine, role, retry
 policy and input, so Scheduler fills in <aws.scheduler.scheduled-time> itself and the run is
-indistinguishable from a scheduled one. It is an official cycle: it writes both paper books and
-can alert. The schedule deletes itself after it fires.
+indistinguishable from a scheduled one. It is an official cycle: it writes both books, trades the
+manager's orders when `MANAGER_BOOK=demo`, and can alert. The schedule deletes itself after it fires.
 
 Usage: uv run python scripts/trigger_cycle.py [--env live] [--in-minutes 2]
 """
@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 PROJECT = "ags"
 PLACEHOLDER = "<aws.scheduler.scheduled-time>"
+SCHEDULE = "cycle-morning"  # either cycle schedule carries the same target
 
 
 def one_time_schedule(cycle: dict, fire_at: datetime) -> dict:
@@ -51,7 +52,7 @@ def main(argv: list[str] | None = None, *, scheduler=None, now: datetime | None 
         os.environ.setdefault("AWS_REGION", "eu-west-1")
         scheduler = boto3.client("scheduler")
     group = f"{PROJECT}-{args.env}"
-    cycle = scheduler.get_schedule(GroupName=group, Name="cycle")
+    cycle = scheduler.get_schedule(GroupName=group, Name=SCHEDULE)
     if PLACEHOLDER not in cycle["Target"]["Input"]:
         raise SystemExit(f"the deployed cycle input has no literal {PLACEHOLDER}: {cycle['Target']['Input']}")
     fire_at = fire_time(now or datetime.now(timezone.utc), args.in_minutes)

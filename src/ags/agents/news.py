@@ -26,15 +26,16 @@ Respond with a JSON object containing exactly this field:
     "reason": one-line reason for that direction call
 No other text — JSON only."""
 
-# Tavily is searched only on the evening cycle (16:00 ET); the 04:00 cycle carries that output
-# forward, which halves search credits. Any run at or after noon ET counts as evening.
-NEWS_FETCH_FROM_HOUR_ET = 12
-# Friday 16:00 -> Monday 04:00 is 60 h; older than this, the slot is left empty and degraded.
+# Tavily is searched only on the first cycle of the day (06:00 ET, after the overnight news); the
+# 12:30 cycle carries that output forward, which halves search credits. Any run before 09:00 ET
+# counts as the first cycle.
+NEWS_FETCH_BEFORE_HOUR_ET = 9
+# Older than this (a long weekend, say) the slot is left empty and degraded.
 MAX_CARRY_AGE = timedelta(days=4)
 
 
 def fetches_news(as_of: datetime) -> bool:
-    return as_of.astimezone(ET).hour >= NEWS_FETCH_FROM_HOUR_ET
+    return as_of.astimezone(ET).hour < NEWS_FETCH_BEFORE_HOUR_ET
 
 
 def carry_forward_news(log_dir: Storage | Path, *, commodity: str, before: datetime) -> dict:

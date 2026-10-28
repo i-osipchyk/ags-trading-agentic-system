@@ -100,14 +100,14 @@ def credit_alerts(
     if "error" not in tavily and remaining is not None:
         if remaining <= 0:
             alerts.append(
-                "⛔ Tavily has no credits left this billing cycle: the next evening cycle will be held. "
+                "⛔ Tavily has no credits left this billing cycle: the next News-searching cycle (06:00 ET) will be held. "
                 "Raise the limit or top up."
             )
         elif tavily_credits_per_evening > 0:
             evenings = remaining // tavily_credits_per_evening
             if evenings < min_cycles:
                 alerts.append(
-                    f"⚠️ Tavily has {remaining} credits left, about {evenings} more evening cycle(s) "
+                    f"⚠️ Tavily has {remaining} credits left, about {evenings} more searching cycle(s) "
                     f"(this one used up to {tavily_credits_per_evening})."
                 )
     return alerts

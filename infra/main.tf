@@ -28,7 +28,7 @@ module "app" {
   # cycles are 12 h apart, and the deploy waits for running executions.
   functions = {
     commodity-pipeline = { handler = "ags.handlers.commodity_pipeline.handler", timeout = 600, memory = 2048 }
-    portfolio          = { handler = "ags.handlers.portfolio.handler", timeout = 300, memory = 1024 }
+    portfolio          = { handler = "ags.handlers.portfolio.handler", timeout = 600, memory = 1024 }
     auditor            = { handler = "ags.handlers.auditor.handler", timeout = 900, memory = 1024 }
     digest             = { handler = "ags.handlers.digest.handler", timeout = 120, memory = 512 }
   }

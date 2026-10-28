@@ -27,7 +27,18 @@ def _results(**overrides):
 
 
 def _event(results, **extra):
-    return {"cycle_id": CYCLE_ID, "scheduled_time": SCHEDULED.isoformat(), "off_schedule": False, "results": results, **extra}
+    return {"cycle_id": CYCLE_ID, "scheduled_time": SCHEDULED.isoformat(), "results": results, **extra}
+
+
+def test_a_slot_already_in_the_demo_managers_store_is_not_run_again(tmp_path):
+    import dataclasses
+
+    storage = LocalStorage(tmp_path)
+    storage.put(f"portfolio/demo/manager/cycles/{CYCLE_ID}.json", b"{}")
+    runtime = _runtime(storage)
+    runtime.portfolio_config = dataclasses.replace(CONFIG, manager_book="demo")
+
+    assert handle(_event(_results()), runtime) == {"cycle_id": CYCLE_ID, "already_recorded": True}
 
 
 def test_failed_commodity_becomes_a_null_call_that_the_guardrails_hold(tmp_path):
@@ -47,15 +58,6 @@ def test_failed_commodity_becomes_a_null_call_that_the_guardrails_hold(tmp_path)
     assert mgr["applied_deltas"]["corn"] == pytest.approx(2.0)
 
 
-def test_off_schedule_execution_writes_no_cycle_files(tmp_path):
-    storage = LocalStorage(tmp_path)
-
-    handle(_event(_results(), off_schedule=True), _runtime(storage))
-
-    assert storage.list("portfolio/manager/cycles/") == []
-    assert storage.list("portfolio/shadow/cycles/") == []
-
-
 def test_late_portfolio_stage_aborts(tmp_path):
     late = datetime(2026, 1, 6, 22, 30, tzinfo=timezone.utc)
 
@@ -68,7 +70,7 @@ def _scheduled_run(storage, when, cycle_id, alerts, results, config=None):
     runtime.alert = alerts.append
     if config:
         runtime.portfolio_config = config
-    event = {"cycle_id": cycle_id, "scheduled_time": when.isoformat(), "off_schedule": False, "results": results}
+    event = {"cycle_id": cycle_id, "scheduled_time": when.isoformat(), "results": results}
     return handle(event, runtime)
 
 
@@ -107,21 +109,9 @@ def test_a_manager_that_fails_every_attempt_raises_an_alert(tmp_path):
     assert "manager" in alerts[0].lower() and "ConnectionError: provider down" in alerts[0]
 
 
-def test_off_schedule_cycles_never_alert(tmp_path):
-    import dataclasses
-
-    runtime = _runtime(LocalStorage(tmp_path))
-    runtime.alert = (alerts := []).append
-    runtime.portfolio_config = dataclasses.replace(CONFIG, drawdown_breaker=1.01)
-
-    handle(_event(_results(), off_schedule=True), runtime)
-
-    assert alerts == []
-
-
 def test_cycle_id_is_derived_from_scheduled_time_when_the_event_has_none(tmp_path):
     storage = LocalStorage(tmp_path)
-    event = {"scheduled_time": "2026-01-06T21:00:00Z", "off_schedule": False, "results": _results()}
+    event = {"scheduled_time": "2026-01-06T21:00:00Z", "results": _results()}
 
     summary = handle(event, _runtime(storage))
 
