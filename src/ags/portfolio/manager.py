@@ -3,7 +3,9 @@ from datetime import datetime
 
 from ags.llm.loop import ChatClient, run_json_loop
 
-SYSTEM_PROMPT_TEMPLATE = """You are the Portfolio Manager for a paper book of seven agricultural futures CFDs, as of {as_of}.
+SYSTEM_PROMPT_TEMPLATE = """You are the Portfolio Manager for a book of seven agricultural futures CFDs, as of {as_of}. The book
+is a fixed capital allocation: "equity" and "free_margin" are measured against that capital, not
+against any wider account.
 
 You decide how much to hold and where, given the seven coordinator calls below. You do not
 re-research or second-guess the calls' direction: you size. Code handles unit conversion, caps,
@@ -12,6 +14,8 @@ independent bets. A neutral call freezes its leg: whatever you return for it is 
 
 Risk is comparable across symbols through "atr_usd_per_lot", the dollar value of one ATR move per lot.
 A symbol whose risk facts are null couldn't be measured this cycle: its leg is held too.
+"price_move_since_call_atr" is how far each price moved, in ATRs, since the analysts priced their call
+(null if unknown); code holds back new exposure on a symbol that moved too far, so size a stale call down.
 
 Respond with a JSON object containing exactly these fields:
   "legs": one entry per symbol, all seven present, each {{"symbol": ..., "delta_lots": signed number added to the current position, "rationale": short text}}
@@ -22,13 +26,15 @@ _CALL_FIELDS = ("call", "conviction", "thesis", "key_drivers")
 _RISK_FIELDS = ("atr", "atr_usd_per_lot")
 
 
-def _manager_inputs(calls, lots, risk, equity, free_margin) -> dict:
+def _manager_inputs(calls, lots, risk, equity, free_margin, drift=None) -> dict:
     return {
         "calls": {s: None if c is None else {f: c[f] for f in _CALL_FIELDS} for s, c in calls.items()},
         "current_lots": lots,
         "risk": {s: {f: r[f] for f in _RISK_FIELDS} for s, r in risk.items()},
         "equity": equity,
         "free_margin": free_margin,
+        # Price move since the analysts priced each call (their intraday reference quote), in ATRs.
+        "price_move_since_call_atr": {s: (drift or {}).get(s) and round(drift[s]["atr"], 2) for s in calls},
     }
 
 
@@ -42,6 +48,7 @@ def run_portfolio_manager(
     risk: dict,
     equity: float,
     free_margin: float,
+    drift: dict | None = None,
 ) -> dict:
     """One LLM call, no tools. Returns the parsed proposal untouched: validating it is guardrail 1's job.
 
@@ -51,7 +58,7 @@ def run_portfolio_manager(
         chat_client,
         model=model,
         system_prompt=SYSTEM_PROMPT_TEMPLATE.format(as_of=as_of.isoformat()),
-        user_prompt=json.dumps(_manager_inputs(calls, lots, risk, equity, free_margin), indent=2, default=str),
+        user_prompt=json.dumps(_manager_inputs(calls, lots, risk, equity, free_margin, drift), indent=2, default=str),
         tools=[],
     )
     try:

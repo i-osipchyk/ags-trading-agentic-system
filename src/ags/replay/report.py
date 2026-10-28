@@ -1,10 +1,11 @@
 import json
 
+from ags.portfolio.stores import SHADOW, active_manager_store
 from ags.storage import Prefixed, Storage
 
 LINES = {
-    "official_manager": ("portfolio", "manager"),
-    "official_shadow": ("portfolio", "shadow"),
+    "official_manager": ("portfolio", "manager"),  # the store in use, see `record`
+    "official_shadow": ("portfolio", SHADOW),
     "replay_manager": ("replay", "manager"),
     "replay_shadow": ("replay", "shadow"),
 }
@@ -25,6 +26,8 @@ def report(store: Storage, replay_id: str) -> list[dict]:
 
     def record(line: str, cycle_id: str) -> dict:
         root, book = LINES[line]
+        if line == "official_manager":
+            book = active_manager_store(store)
         return json.loads(roots[root].get(f"portfolio/{book}/cycles/{cycle_id}.json"))
 
     replayed = [k.rsplit("/", 1)[1].removesuffix(".json") for k in roots["replay"].list("portfolio/manager/cycles/")]

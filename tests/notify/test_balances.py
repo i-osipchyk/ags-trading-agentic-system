@@ -65,7 +65,7 @@ def test_deepseek_unavailable_is_an_outright_alert_and_cny_never_guesses_a_rate(
 
 
 def test_tavily_warns_on_evenings_left_and_when_empty():
-    assert "about 3 more evening" in alerts(tavily={"remaining": 30})[0]
+    assert "about 3 more searching" in alerts(tavily={"remaining": 30})[0]
     assert alerts(tavily={"remaining": 40}) == []
     # A morning cycle uses no credits: only an empty account alerts.
     assert alerts(tavily={"remaining": 5}, credits=0) == []

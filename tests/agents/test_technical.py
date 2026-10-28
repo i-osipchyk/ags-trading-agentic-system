@@ -233,3 +233,75 @@ def test_run_technical_analyst_degrades_a_reply_with_a_mistyped_field_but_keeps_
     assert result["degraded"] is True
     assert result["key_levels"] is None
     assert result["seasonality_alignment"] == "typical"
+
+# --- get_prices with a lower timeframe ---
+
+FINAL = {"role": "assistant", "tool_calls": None, "content": json.dumps({
+    "seasonality_alignment": "typical", "key_levels": {"recent_range": [1, 2], "breakout_points": []},
+    "chart_description": "x",
+})}
+
+
+class IntradayPricesClient(FakePricesClient):
+    """Daily bars plus a 15-minute bar for every quarter hour in the requested range."""
+
+    def get_bars(self, symbol_name, tf, start, end):
+        self.calls.append(("bars", tf, start, end))
+        out, t = [], start
+        while t < end:
+            out.append({"timestamp": t.isoformat(), "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 1})
+            t += timedelta(minutes=15)
+        return out
+
+
+def _ask_for(tmp_path, arguments, *, now, as_of=datetime(2026, 6, 5, 6, 0, tzinfo=ET)):
+    client = IntradayPricesClient({"Corn": _rising_corn_bars(as_of.date())})
+    call = {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "1", "type": "function", "function": {"name": "get_prices", "arguments": json.dumps(arguments)}}
+    ]}
+    chat = FakeChatClient([call, FINAL])
+    run_technical_analyst(
+        tmp_path, chat, commodity="corn", as_of=as_of, model="m", prices_client=client, now=now, history_days=550
+    )
+    tool_message = next(m for m in chat.calls[1]["messages"] if m["role"] == "tool")
+    return json.loads(tool_message["content"]), chat, client
+
+
+LIVE_NOW = datetime(2026, 6, 5, 6, 0, 20, tzinfo=ET)
+
+
+def test_the_tool_advertises_the_timeframes_and_the_prompt_explains_them(tmp_path):
+    _, chat, _ = _ask_for(tmp_path, {"start": "2026-06-05", "end": "2026-06-05", "tf": "H1"}, now=LIVE_NOW)
+
+    system = chat.calls[0]["messages"][0]["content"]
+    assert '"tf"' in system and "H1" in system and "completed" in system
+    tool = next(t for t in chat.calls[0]["tools"] if t["function"]["name"] == "get_prices")
+    assert tool["function"]["parameters"]["properties"]["tf"]["enum"] == ["D1", "M15", "M30", "H1"]
+
+
+def test_an_hourly_request_returns_completed_utc_bars_and_includes_the_end_day(tmp_path):
+    result, _, client = _ask_for(tmp_path, {"start": "2026-06-05", "end": "2026-06-05", "tf": "m15"}, now=LIVE_NOW)
+
+    assert result["tf"] == "M15"
+    stamps = [b["timestamp"] for b in result["bars"]]
+    assert stamps[0].startswith("2026-06-05T00:00") and stamps[-1].startswith("2026-06-05T09:45")  # 06:00 EDT = 10:00 UTC
+    assert any(c[0] == "bars" and c[1] == "M15" for c in client.calls)
+
+
+def test_a_long_intraday_request_is_capped_and_says_so(tmp_path):
+    result, _, _ = _ask_for(tmp_path, {"start": "2026-06-01", "end": "2026-06-05", "tf": "M15"}, now=LIVE_NOW)
+
+    assert len(result["bars"]) == 200 and "newest 200" in result["note"]
+
+
+def test_an_unknown_timeframe_is_an_error_the_model_can_read(tmp_path):
+    result, _, client = _ask_for(tmp_path, {"start": "2026-06-05", "end": "2026-06-05", "tf": "M1"}, now=LIVE_NOW)
+
+    assert "unsupported tf" in result["error"] and not any(c[0] == "bars" for c in client.calls)
+
+
+def test_a_replayed_run_never_fetches_lower_timeframe_bars_live(tmp_path):
+    long_after = datetime(2026, 6, 9, tzinfo=ET)
+    result, _, client = _ask_for(tmp_path, {"start": "2026-06-05", "end": "2026-06-05", "tf": "H1"}, now=long_after)
+
+    assert result["bars"] == [] and not any(c[0] == "bars" for c in client.calls)

@@ -51,6 +51,8 @@ src/ags/
   portfolio/         # v3: no LLM code except manager.py
     book.py          # Book protocol + cTrader-shaped Position/Fill models
     paper_book.py    # PaperBook: fills, swap, margin, stop-out replay
+    demo_book.py     # DemoBook: manager's book on the Pepperstone demo account (state read from the broker)
+    demo_gateway.py  # CTraderDemoGateway: the only module that sends orders; demo host only
     specs.py         # symbol specs (lot size, volume min/step/max, swap, margin rate)
     risk.py          # ATR, atr_usd_per_lot, notional
     guardrails.py    # pure function: proposal → applied deltas + violations
@@ -171,7 +173,15 @@ timezone-aware `as_of: datetime`:
   end-of-day when unknown — conservative, never early).
 - Daily price bars: only **completed** bars are visible at `as_of`. The 04:00
   cycle never sees the in-progress session as a close.
-- Quotes and intraday bars are new PIT objects keyed by capture timestamp.
+- Quotes and intraday bars (M15, M30, H1) are new PIT objects keyed by capture timestamp; a call
+  asking for a longer look-back than an earlier capture backfills the older part. A live cycle
+  fetches them on demand (the technical analyst's `get_prices(tf=...)`); a replay only reads
+  what was captured by its `as_of`. The pipeline's
+  reference quote is one of them, captured at pipeline start and only for a live cycle (within
+  one hour of the scheduled time); a replayed run gets none and keeps the last-close price.
+- Cycles are 06:00 and 12:30 ET (all Pepperstone ags markets open; see DESIGN.md). The stage
+  re-captures execution quotes after the manager's model call, so both books trade on the same
+  fresh quotes, and records `reference_prices`, `drift`, and `costs.drift`.
 - `run_id` was already timestamped; `as_of` is the cycle's trigger timestamp.
 
 The fixture suite gains intraday cases: same-day release before vs after
@@ -335,7 +345,7 @@ past calls against how they graded out, and adjust emphasis accordingly
 | --- | --- | --- |
 | DeepSeek V4.1 Flash | All agents (model) | OpenAI-compatible API, hand-rolled loop |
 | cTrader Open API | `get_prices` | Official Spotware Python SDK (Twisted-based), wrapped with `crochet` to expose an asyncio-facing interface; credentials via env vars the user provides |
-| Tavily | News analyst search | LLM-shaped search API; free tier (1,000 credits/mo). Searched on the 16:00 ET cycle only (the 04:00 cycle carries the output forward, `agents/news.py`): worst case 7 commodities × 5 tool calls × ~22 weekdays ≈ 770 credits/mo, vs ≈ 1,540 if both cycles searched |
+| Tavily | News analyst search | LLM-shaped search API; free tier (1,000 credits/mo). Searched on the 06:00 ET cycle only (the 12:30 cycle carries the output forward, `agents/news.py`): worst case 7 commodities × 5 tool calls × ~22 weekdays ≈ 770 credits/mo, vs ≈ 1,540 if both cycles searched |
 | USDA ESMIS archive | WASDE, Crop Progress, Export Sales | Scrape/parse the dated release archive directly — **not** PSD Online or NASS Quick Stats, both of which return latest-revised values rather than as-published figures |
 | UNICA / Conab / ISO | Sugar & Brazilian crop supply | Scrape/parse each body's public release archive into the PIT store, same pattern as ESMIS |
 | ICO / ICCO / ICAC | Coffee / cocoa / cotton supply-demand | Same scrape/parse pattern; built lazily, one per commodity, only when that commodity is actually worked on |
@@ -400,7 +410,7 @@ would be a second official record). Names are `ags-live-<name>`.
 
 ```
 EventBridge Scheduler  cron(0 4,16 ? * MON-FRI *)  tz America/New_York
-  └─ Step Functions "ags-live-cycle"  (input: cycle_id, scheduled_time, off_schedule)
+  └─ Step Functions "ags-live-cycle"  (input: cycle_id, scheduled_time)
        ├─ Map ×7 (parallel) → Lambda commodity-pipeline(commodity)
        │     retry 2× with backoff; Catch → {commodity, failed: true}
        └─ Lambda portfolio(cycle_id, commodity results)
@@ -430,18 +440,16 @@ scripts/retry_cycle.py (by hand) → Step Functions, same slot, within the retry
   `failed: true` commodity becomes a `null` call → guardrail 9 holds its leg.
   Two consecutive failures for the same commodity alert.
 - **On-demand cycles** (`uv run python scripts/trigger_cycle.py`) create a
-  one-time Scheduler schedule, a couple of minutes ahead, with the `cycle`
+  one-time Scheduler schedule, a couple of minutes ahead, with the `cycle-morning`
   schedule's target copied verbatim. Scheduler fills in the scheduled-time
-  placeholder, so the run takes exactly the path of a 04:00/16:00 cycle and
-  **is an official cycle**: it writes both books and can alert. Its
-  `scheduled_time` is the fire time, so a run at or after noon ET is an
-  evening (News-searching) cycle. Use it to test the real path; a hand-started
-  execution never exercises Scheduler's substitution.
-- **Off-schedule cycles** (started by hand:
-  `aws stepfunctions start-execution` with `off_schedule: true`) run the full
-  pipeline and the manager but **do not write either book** — the proposal
-  and would-be fills are logged only. Keeps the paper P&L strictly on the
-  scheduled cadence.
+  placeholder, so the run takes exactly the path of a 06:00/12:30 cycle and
+  **is an official cycle**: it writes both books, places the manager's orders
+  when `MANAGER_BOOK=demo`, and can alert. There is no dry-run flag. Its
+  `scheduled_time` is the fire time, so a run before 09:00 ET is a News-searching
+  cycle and a later one carries the news forward. Use it to test the real path;
+  a hand-started execution never exercises Scheduler's substitution. The
+  repeat-cycle guard and `put_if_absent` keep one cycle id from trading or
+  recording twice.
 
 ### Retrying a held cycle
 
@@ -469,8 +477,8 @@ so `llm/client.py` and `tools/sources/news.py` record it in `ags/blockers.py`, p
   `logs/` still see one attempt per run, and nothing logged is lost. A Step Functions retry of
   a crashed pipeline takes the same path. A slot already in the book is a no-op.
 - **Point in time:** decisions stay `as_of` the scheduled time (the PIT reads, and the
-  evening news search cached by the first attempt). News is filtered at date granularity, so a
-  late evening retry can see a same-day article published after 16:00 that an on-time run
+  news search cached by the first attempt). News is filtered at date granularity, so a
+  late retry can see a same-day article published after 06:00 that an on-time run
   wouldn't have. This is the accepted cost of the window. Fills are at the quote when the
   retry's portfolio stage runs, like any cycle.
 
@@ -478,7 +486,7 @@ so `llm/client.py` and `tools/sources/news.py` record it in `ags/blockers.py`, p
 DeepSeek balance (`/user/balance`) and Tavily credits (`/usage`), and alerts when either is
 exhausted or covers fewer than `MIN_CYCLES_OF_CREDIT` (default 4) more cycles at this cycle's
 rate (`notify/balances.py`). The rate is this cycle's LLM $ from its run logs, and for Tavily an
-upper bound counted from the news agent's tool calls, on evening cycles only. A check that fails
+upper bound counted from the news agent's tool calls, on the 06:00 (searching) cycle only. A check that fails
 is logged, never raised.
 
 ## Storage backend (v3)
@@ -535,8 +543,23 @@ is logged, never raised.
   (`aws ssm put-parameter --overwrite`). The portfolio Lambda reads it and records
   the reset in the next cycle file — so the reset is logged and the book
   still has exactly one writer.
+- **Demo account (`MANAGER_BOOK=demo`):** `DemoBook` wraps a `TradingGateway`
+  (`CTraderDemoGateway`). The account is `CTRADER_TRADING_ACCOUNT_ID`, defaulting to
+  `CTRADER_ACCOUNT_ID`; the shared token needs trading scope. The gateway checks scope and
+  `isLive` and a hedging account type before any order. The account is shared with other
+  strategies, so the manager's `balance` is a ledger carried in its own `closing_state`
+  (starting capital `STARTING_EQUITY_USD` +/- its own deals), never the account's, kept in its
+  own store `portfolio/demo/manager/cycles/` so the first demo cycle starts from scratch
+  (`portfolio/manager/` stays the paper manager's, `portfolio/shadow/` the shadow's; see
+  `portfolio/stores.py`); its
+  positions are the ones labelled `ags`. Cycle records add `book_kind`, per-fill `status`,
+  `commission`, `swap`, a `costs` summary, and `reconciled_closes` (closes the manager did not send).
+  A demo account must also use the demo host for market data: set `CTRADER_DEMO=true`
+  (`put_secrets.py` pushes it). The portfolio Lambda's timeout is 600 s, enough for seven
+  re-quotes and up to 14 sequential orders at 30 s each. `scripts/demo_smoke.py` checks the
+  connection; with `--trade` it opens and closes the minimum volume once.
 - **No-live-execution test:** `tests/test_no_live_execution.py` greps
-  `src/` for cTrader trading message names (`ProtoOANewOrderReq`,
+  `src/` (outside `demo_gateway.py`) for cTrader trading message names (`ProtoOANewOrderReq`,
   `ProtoOAAmendPositionSLTPReq`, `ProtoOAClosePositionReq`,
   `ProtoOACancelOrderReq`, `ProtoOAAmendOrderReq`) and fails on any hit.
 

@@ -130,6 +130,8 @@ class Config:
     chart_lookback_candles: int
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    ctrader_trading_account_id: int = 0
+    ctrader_demo: bool = False  # the account is a demo account: market data comes from the demo host too
 
     @classmethod
     def from_env(cls, *, refresh: bool = False) -> "Config":
@@ -157,4 +159,7 @@ class Config:
             ),
             telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN") or "",
             telegram_chat_id=env.get("TELEGRAM_CHAT_ID") or "",
+            ctrader_demo=(env.get("CTRADER_DEMO") or "").strip().lower() in ("1", "true", "yes"),
+            # The demo account the manager trades; defaults to the project's one cTrader account.
+            ctrader_trading_account_id=int(env.get("CTRADER_TRADING_ACCOUNT_ID") or env["CTRADER_ACCOUNT_ID"]),
         )

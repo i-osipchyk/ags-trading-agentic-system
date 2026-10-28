@@ -24,9 +24,12 @@ sources, logging format, AWS deployment, and everything else *how*-shaped):
 
 Per commodity, every cycle:
 
-- **Technical analyst** — trend, volatility, seasonality alignment
+- **Technical analyst** — trend, volatility, seasonality alignment. Also gets the
+  **intraday** reference quote (clearly marked as not a closed bar); its `get_prices`
+  tool is bound to its own commodity and returns completed candles only: daily by default,
+  or lower timeframes via `tf` (M15, M30, H1)
 - **News analyst** — recent headlines, deduped, no commentary. Searches (Tavily) on
-  the 16:00 ET cycle only; at 04:00 it carries the latest searched output forward
+  the 06:00 ET cycle only; at 12:30 it carries the latest searched output forward
   (`carried_forward`, `source_run_id`), with no search and no model call
 - **Weather/season analyst** — regional conditions + crop growth stage
 - **Supply/demand analyst** — USDA/UNICA/Conab/ISO report data (plus
@@ -69,16 +72,24 @@ the position instead of calling the market.
 
 ## Hard constraints — do not violate these
 
-- **No live execution.** Agents may propose position changes, and code may
-  apply them **only to the paper book** (S3-backed, see `ARCHITECTURE.md`).
-  Nothing in this codebase sends an order to a broker. The book sits behind
-  a cTrader-shaped `Book` interface whose only implementation is
-  `PaperBook`; a live implementation is out of scope until the user
-  explicitly decides otherwise. Enforced by a test that fails if any cTrader
-  trading message (`ProtoOANewOrderReq`, `ProtoOAAmendPositionSLTPReq`,
-  `ProtoOAClosePositionReq`, …) is referenced anywhere in `src/`. If a task
-  looks like it's adding live execution, stop and confirm with the user
-  first.
+- **No live execution; demo account only.** Agents may propose position changes, and
+  code applies them to a `Book`: the **shadow** always to `PaperBook` (S3-backed,
+  see `ARCHITECTURE.md`), the **manager** to `PaperBook` or, with
+  `MANAGER_BOOK=demo`, to `DemoBook` — market orders on the **Pepperstone
+  demo account** (`src/ags/portfolio/demo_gateway.py`, the only module that
+  may reference cTrader trading messages). The gateway connects to the demo host
+  only and refuses an account that is live, not hedging, or a token without trading scope.
+  The account is **shared with other strategies**: the manager's equity is a ledger in its own
+  cycle records (`STARTING_EQUITY_USD` = 10k +/- its own P&L; margin is measured against it, not
+  the account), kept in its own store `portfolio/demo/manager/`, separate from the paper
+  manager's, so it starts from scratch. Only positions labelled `ags` are its own.
+  Nothing may ever trade a live account; a live `Book` is out of scope until
+  the user explicitly decides otherwise. Enforced by
+  `tests/test_no_live_execution.py` (trading messages only in that one file, demo
+  host only, `isLive` checked). Every cycle the AWS state
+  machine runs trades and is recorded the same way (there is no dry-run flag); a local
+  `scripts/run_cycle.py` has no broker connection and stays on `PaperBook`. If a task looks like it's adding live
+  execution, stop and confirm with the user first.
 - **Point-in-time data only.** Every data-access function takes an `as_of`
   timestamp and must not return information that wasn't public as of that
   timestamp. This is the #1 way this kind of backtest silently breaks —
@@ -104,8 +115,8 @@ the position instead of calling the market.
   (or its retry: a cycle held by a blocking provider error — no credit, a
   rejected key — may be re-run for the same slot within `RETRY_WINDOW_HOURS`
   via `scripts/retry_cycle.py`; see `ARCHITECTURE.md` § Retrying a held
-  cycle), and only the portfolio Lambda writes the paper book, at most one
-  record per slot.
+  cycle), and only the portfolio Lambda writes the book records and trades
+  the demo account, at most one record per slot.
 - **Everything logged**, keyed by `run_id` (per commodity) and `cycle_id`
   (per portfolio stage): prompts, tool calls, tool results, outputs, raw
   manager proposals, guardrail violations, and fills. Any run must be
@@ -120,11 +131,18 @@ guardrails cap them as one grain bucket).
 
 ## Run cadence
 
-Twice per weekday at fixed times — **16:00 and 04:00 ET, Monday–Friday**,
+Twice per weekday at fixed times — **06:00 and 12:30 ET, Monday–Friday**,
 no weekend runs — triggered by EventBridge Scheduler on AWS. The coordinator
 still makes a single **1-week-horizon** call; consecutive calls overlap, so
 scorecards must weight them (see `DESIGN.md`) rather than count every call
 as an independent sample.
+
+The times are chosen so **all seven Pepperstone markets are open** (08:45–12:45 and
+13:30–16:59 UTC in summer, an hour later in winter; ET times are stable across DST), so the
+manager's orders can fill. Cycle A (06:00) searches news; cycle B (12:30) carries it forward.
+Each commodity pipeline captures an **intraday reference quote** when it starts; the call is
+priced and graded from it, and the stage measures the **drift** from it to the execution
+quote (guardrail 10 holds back new exposure after a big move).
 
 ## Platform (`~/dev/platform`)
 

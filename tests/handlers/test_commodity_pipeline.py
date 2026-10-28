@@ -24,7 +24,7 @@ def _runtime(tmp_path, now, chat_client=None):
 
 def _event(**overrides):
     return {"commodity": "corn", "cycle_id": "cycle_2026-06-05T20-00-00Z",
-            "scheduled_time": SCHEDULED.isoformat(), "off_schedule": False, **overrides}
+            "scheduled_time": SCHEDULED.isoformat(), **overrides}
 
 
 def test_execution_starting_over_an_hour_late_aborts_without_running(tmp_path):
@@ -142,13 +142,3 @@ def test_a_retry_after_the_window_aborts(tmp_path):
     runtime.now = lambda: datetime(2026, 6, 5, 23, 0, 1, tzinfo=timezone.utc)  # 3 h 1 s late
     with pytest.raises(LateStartError, match="retry"):
         handle(_event(), runtime)
-
-
-def test_an_off_schedule_run_never_takes_the_retry_path(tmp_path):
-    runtime = _broke_runtime(tmp_path)
-    handle(_event(), runtime)
-
-    runtime.now = lambda: datetime(2026, 6, 5, 22, 30, tzinfo=timezone.utc)
-    with pytest.raises(LateStartError, match="start"):
-        handle(_event(off_schedule=True), runtime)
-    assert runtime.storage.list("attempts/") == []

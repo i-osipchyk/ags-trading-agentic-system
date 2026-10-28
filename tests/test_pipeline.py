@@ -6,7 +6,7 @@ from ags.logging.run_log import RunLog
 from ags.pipeline import run_pipeline
 from ags.tools.pit_store import ET
 
-AS_OF = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
+AS_OF = datetime(2026, 6, 5, 6, 0, tzinfo=ET)
 TRIGGER = datetime(2026, 6, 5, 18, 30, 0, tzinfo=timezone.utc)
 
 _CANNED = {
@@ -298,7 +298,7 @@ def test_run_pipeline_stamps_the_call_with_the_as_of_close_from_code_not_the_mod
         news_client=EmptyNewsClient(),
     )
 
-    assert result["call"]["price_at_call"] == {"price": 5.25, "date": "2026-06-04"}
+    assert result["call"]["price_at_call"] == {"price": 5.25, "date": "2026-06-04", "kind": "daily_close"}
 
 
 def test_run_pipeline_leaves_price_at_call_empty_when_prices_are_unavailable(tmp_path):
@@ -358,10 +358,10 @@ def test_run_pipeline_gives_the_coordinator_its_past_calls_but_not_the_current_r
     assert [a["checkpoint_weeks"] for a in runs[0]["audits"]] == [1]
 
 
-# --- News: Tavily on the evening cycle only; the morning cycle carries it forward -------------
+# --- News: Tavily on the first cycle only; the second cycle carries it forward -------------
 
-EVENING = datetime(2026, 6, 4, 16, 0, tzinfo=ET)  # Thu 16:00 ET
-MORNING = datetime(2026, 6, 5, 4, 0, tzinfo=ET)  # Fri 04:00 ET, the next cycle
+FIRST = datetime(2026, 6, 4, 6, 0, tzinfo=ET)  # Thu 06:00 ET, searches
+SECOND = datetime(2026, 6, 4, 12, 30, tzinfo=ET)  # Thu 12:30 ET, carries
 
 
 class CountingNewsClient:
@@ -387,19 +387,19 @@ def _replies_with_headline(headline):
     return replies
 
 
-def test_fetches_news_only_from_noon_et():
+def test_fetches_news_only_before_nine_et():
     from ags.agents.news import fetches_news
 
-    assert fetches_news(EVENING)
-    assert not fetches_news(MORNING)
-    assert fetches_news(datetime(2026, 6, 5, 20, 0, tzinfo=timezone.utc))  # 16:00 EDT given in UTC
+    assert fetches_news(FIRST)
+    assert not fetches_news(SECOND)
+    assert fetches_news(datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc))  # 06:00 EDT given in UTC
 
 
 def test_morning_cycle_carries_the_evening_news_without_searching_or_calling_the_model(tmp_path):
-    evening = _cycle(tmp_path, EVENING, RoutingChatClient(_replies_with_headline("Corn rallies")))
+    evening = _cycle(tmp_path, FIRST, RoutingChatClient(_replies_with_headline("Corn rallies")))
     chat, news = RoutingChatClient(), CountingNewsClient()
 
-    morning = _cycle(tmp_path, MORNING, chat, news)
+    morning = _cycle(tmp_path, SECOND, chat, news)
 
     assert morning["outputs"]["news"] == {
         "headlines": [{"headline": "Corn rallies", "direction": "bullish"}],
@@ -417,20 +417,20 @@ def test_morning_cycle_carries_the_evening_news_without_searching_or_calling_the
 
 
 def test_a_carried_output_points_at_the_run_that_searched_not_at_another_carry(tmp_path):
-    evening = _cycle(tmp_path, EVENING, RoutingChatClient(_replies_with_headline("Corn rallies")))
-    _cycle(tmp_path, MORNING)
+    evening = _cycle(tmp_path, FIRST, RoutingChatClient(_replies_with_headline("Corn rallies")))
+    _cycle(tmp_path, SECOND)
 
     # Off-schedule morning run an hour later: the newest log is a carry, so it is skipped.
-    again = _cycle(tmp_path, MORNING + timedelta(hours=1))
+    again = _cycle(tmp_path, SECOND + timedelta(hours=1))
 
     assert again["outputs"]["news"]["source_run_id"] == evening["run_id"]
 
 
 def test_morning_cycle_never_carries_news_from_after_its_as_of(tmp_path):
-    later = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
+    later = datetime(2026, 6, 5, 12, 30, tzinfo=ET)
     _cycle(tmp_path, later, RoutingChatClient(_replies_with_headline("From the future")))
 
-    morning = _cycle(tmp_path, MORNING)
+    morning = _cycle(tmp_path, SECOND)
 
     assert morning["outputs"]["news"] == {
         "headlines": [], "degraded": True, "carried_forward": True, "source_run_id": None,
@@ -438,17 +438,58 @@ def test_morning_cycle_never_carries_news_from_after_its_as_of(tmp_path):
 
 
 def test_monday_morning_carries_friday_evening_across_the_weekend(tmp_path):
-    friday = _cycle(tmp_path, datetime(2026, 6, 5, 16, 0, tzinfo=ET), RoutingChatClient(_replies_with_headline("Friday news")))
+    friday = _cycle(tmp_path, datetime(2026, 6, 5, 6, 0, tzinfo=ET), RoutingChatClient(_replies_with_headline("Friday news")))
 
-    monday = _cycle(tmp_path, datetime(2026, 6, 8, 4, 0, tzinfo=ET))
+    monday = _cycle(tmp_path, datetime(2026, 6, 8, 12, 30, tzinfo=ET))
 
     assert monday["outputs"]["news"]["source_run_id"] == friday["run_id"]
 
 
 def test_morning_cycle_with_no_recent_evening_run_is_degraded_and_empty(tmp_path):
-    _cycle(tmp_path, EVENING - timedelta(days=5), RoutingChatClient(_replies_with_headline("Old news")))
+    _cycle(tmp_path, FIRST - timedelta(days=5), RoutingChatClient(_replies_with_headline("Old news")))
 
-    morning = _cycle(tmp_path, MORNING)
+    morning = _cycle(tmp_path, SECOND)
 
     assert morning["outputs"]["news"]["source_run_id"] is None
     assert morning["outputs"]["news"]["degraded"] is True
+
+
+# --- intraday reference quote -----------------------------------------------------------------
+
+
+class QuotingPricesClient(WeekdayPricesClient):
+    def get_quote(self, symbol_name):
+        return {"symbol_id": 1, "bid": 5.40, "ask": 5.42, "timestamp": "2026-06-05T10:00:03+00:00"}
+
+
+def _live_run(tmp_path, chat, client, *, now):
+    return run_pipeline(
+        commodity="corn", as_of=AS_OF, trigger_timestamp=AS_OF, chat_client=chat, model="stub-model",
+        log_dir=tmp_path / "logs", data_dir=tmp_path / "data", prices_client=client,
+        news_client=EmptyNewsClient(), now=now,
+    )
+
+
+def test_a_live_cycle_stamps_the_intraday_quote_and_tells_the_analysts_it_is_intraday(tmp_path):
+    chat = RoutingChatClient()
+
+    result = _live_run(tmp_path, chat, QuotingPricesClient(), now=AS_OF + timedelta(seconds=5))
+
+    price = result["call"]["price_at_call"]
+    assert price["kind"] == "intraday_quote" and price["price"] == 5.41
+    assert price["last_close"]["price"] == 5.25
+    technical = next(m for m in chat.calls if "Technical analyst" in m[0]["content"])[0]["content"]
+    assert "INTRADAY price (a live quote" in technical and "not a closed daily bar" in technical
+    assert "+3.05%" in technical  # 5.41 against the 5.25 close
+    coordinator = next(m for m in chat.calls if "Coordinator" in m[0]["content"])[1]["content"]
+    assert "INTRADAY mid 5.41" in coordinator
+
+
+def test_a_replayed_cycle_gets_no_reference_quote(tmp_path):
+    chat = RoutingChatClient()
+
+    result = _live_run(tmp_path, chat, QuotingPricesClient(), now=AS_OF + timedelta(days=3))
+
+    assert result["call"]["price_at_call"]["kind"] == "daily_close"
+    technical = next(m for m in chat.calls if "Technical analyst" in m[0]["content"])[0]["content"]
+    assert "Intraday price: unavailable" in technical

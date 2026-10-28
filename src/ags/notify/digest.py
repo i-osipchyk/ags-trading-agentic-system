@@ -3,6 +3,8 @@ from datetime import datetime
 
 from ags.logging.run_id import generate_run_id
 from ags.notify.spend import cycle_spend, llm_spend
+from ags.portfolio.metrics import manager_vs_shadow
+from ags.portfolio.stores import PAPER_MANAGER, SHADOW
 from ags.storage import Storage
 from ags.tools.pit_store import ET
 from ags.tools.sources.prices import CTRADER_SYMBOL_NAMES
@@ -88,9 +90,9 @@ def _cycle_log_keys(record: dict) -> list[str]:
     return [*runs, f"portfolio/logs/{record['cycle_id']}.jsonl"]
 
 
-def _spend_section(storage: Storage, now: datetime) -> list[str]:
+def _spend_section(storage: Storage, now: datetime, manager_store: str) -> list[str]:
     mtd = llm_spend(storage, now=now)["mtd"]
-    manager = _latest(storage, "manager")
+    manager = _latest(storage, manager_store)
     lines = [_h2("Spend")]
     if manager is not None:
         cycle = cycle_spend(storage, _cycle_log_keys(manager))
@@ -103,17 +105,16 @@ def _spend_section(storage: Storage, now: datetime) -> list[str]:
     return lines
 
 
-def _book_section(storage: Storage) -> list[str]:
-    (manager, manager_prev), (shadow, shadow_prev) = _recent(storage, "manager"), _recent(storage, "shadow")
+def _book_section(storage: Storage, manager_store: str) -> list[str]:
+    (manager, manager_prev), (shadow, shadow_prev) = _recent(storage, manager_store), _recent(storage, SHADOW)
     if manager is None or shadow is None:
         return [_h2("Book"), "No scheduled cycle yet"]
-    gap = manager["equity"] - shadow["equity"]
-    previous_gap = manager_prev["equity"] - shadow_prev["equity"] if manager_prev and shadow_prev else None
-    return [
-        _h2("Book"), *_book_block("Manager", manager, manager_prev), "",
-        *_book_block("Shadow", shadow, shadow_prev), "",
-        f"Manager − shadow: {_signed_money(gap)}{_change(gap, previous_gap)}",
-    ]
+    lines = [_h2("Book"), *_book_block("Manager", manager, manager_prev), "", *_book_block("Shadow", shadow, shadow_prev)]
+    rows = manager_vs_shadow(storage, manager_store)
+    if rows:  # equity change since the manager's first cycle, so a manager that started later is still comparable
+        gap, previous_gap = rows[-1]["diff"], rows[-2]["diff"] if len(rows) > 1 else None
+        lines += ["", f"Manager − shadow since {rows[0]['as_of'][:10]}: {_signed_money(gap)}{_change(gap, previous_gap)}"]
+    return lines
 
 
 def _call(record: dict, commodity: str) -> str:
@@ -121,8 +122,8 @@ def _call(record: dict, commodity: str) -> str:
     return f"{call['call']} {call['conviction']}" if call else "failed"
 
 
-def _calls_section(storage: Storage) -> list[str]:
-    manager, previous = _recent(storage, "manager")
+def _calls_section(storage: Storage, manager_store: str) -> list[str]:
+    manager, previous = _recent(storage, manager_store)
     if manager is None:
         return []
     lines = [_h2("Latest calls")]
@@ -132,11 +133,11 @@ def _calls_section(storage: Storage) -> list[str]:
     return lines
 
 
-def compose_digest(storage: Storage, *, now: datetime) -> str:
+def compose_digest(storage: Storage, *, now: datetime, manager_store: str = PAPER_MANAGER) -> str:
     sections = [
         [f"<b>AGS Digest · {now.astimezone(ET):%Y-%m-%d %H:%M} ET</b>"],
-        _spend_section(storage, now),
-        _book_section(storage),
-        _calls_section(storage),
+        _spend_section(storage, now, manager_store),
+        _book_section(storage, manager_store),
+        _calls_section(storage, manager_store),
     ]
     return "\n\n".join("\n".join(s) for s in sections if s)

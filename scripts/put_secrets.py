@@ -29,7 +29,7 @@ SECRETS: tuple[str, ...] = (
     "TELEGRAM_CHAT_ID",
 )
 # Non-secret overrides; pushed only when set in .env (otherwise the code's default applies).
-OPTIONAL: tuple[str, ...] = ("DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL", "MAX_TOOL_CALLS", "CHART_LOOKBACK_CANDLES")
+OPTIONAL: tuple[str, ...] = ("CTRADER_DEMO", "CTRADER_TRADING_ACCOUNT_ID", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL", "MAX_TOOL_CALLS", "CHART_LOOKBACK_CANDLES")
 
 
 def main() -> None:

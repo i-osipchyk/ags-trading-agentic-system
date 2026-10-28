@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 load_env()  # once per cold start: AWS_REGION default, SSM -> os.environ
 
 _AUTH_ERROR_MARKERS = ("ACCESS_TOKEN", "CANT_ROUTE_REQUEST", "ACCOUNT_NOT_AUTHORIZED")
-_CONTEXT_KEYS = ("commodity", "cycle_id", "scheduled_time", "off_schedule")
+_CONTEXT_KEYS = ("commodity", "cycle_id", "scheduled_time")
 
 
 def _is_auth_error(exc: Exception) -> bool:
@@ -69,9 +69,11 @@ def _invoke_once(handle, event: dict, build):
         return handle(event, runtime)
     finally:
         flush(getattr(runtime, "chat_client", None))
-        close = getattr(runtime.market_client, "close", None)
-        if close:
-            close()
+        made = getattr(getattr(runtime, "trading_gateway", None), "made", lambda: None)()
+        for client in (runtime.market_client, made):
+            close = getattr(client, "close", None)
+            if close:
+                close()
 
 
 def build_default_runtime():
@@ -80,11 +82,13 @@ def build_default_runtime():
     from ags.config import Config
     from ags.handlers.runtime import build_runtime
     from ags.llm.client import LLMClient
+    from ags.portfolio.demo_gateway import CTraderDemoGateway
     from ags.tools.sources.prices import CTraderPricesClient
 
     return build_runtime(
         os.environ, config=Config.from_env(refresh=True), ssm_client=boto3.client("ssm"),
         chat_factory=lambda config: LLMClient(), market_factory=CTraderPricesClient,
+        trading_factory=CTraderDemoGateway,
         alert_factory=lambda config: _telegram(config).send,
     )
 
@@ -105,10 +109,11 @@ def digest_handler(event, context):
     from datetime import datetime, timezone
 
     from ags.handlers import digest
+    from ags.portfolio.stores import manager_store
     from ags.storage import S3Storage
 
     return digest.handle(
         event, storage=S3Storage(os.environ["AGS_BUCKET"]), telegram=_telegram(_config()),
-        now=datetime.now(timezone.utc),
+        now=datetime.now(timezone.utc), manager_store=manager_store(os.environ.get("MANAGER_BOOK", "paper")),
     )
 

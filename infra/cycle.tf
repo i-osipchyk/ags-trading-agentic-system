@@ -71,7 +71,7 @@ resource "aws_sfn_state_machine" "cycle" {
   depends_on = [aws_iam_role_policy.sfn]
 }
 
-# --- schedule: 04:00 and 16:00 ET, Monday-Friday ---------------------------------------------
+# --- schedule: 06:00 and 12:30 ET, Monday-Friday (every Pepperstone ags market is open) ---------------------------------------------
 
 data "aws_iam_policy_document" "scheduler_trust" {
   statement {
@@ -106,11 +106,17 @@ resource "aws_iam_role_policy" "cycle_scheduler" {
   })
 }
 
+# EventBridge cron cannot express 06:00 and 12:30 in one expression, so one schedule per slot.
 resource "aws_scheduler_schedule" "cycle" {
-  name = "cycle"
+  for_each = {
+    morning = "cron(0 6 ? * MON-FRI *)"
+    midday  = "cron(30 12 ? * MON-FRI *)"
+  }
+
+  name = "cycle-${each.key}"
   # The module's schedule group (<project>-<env>); the deploy role manages schedules only there.
   group_name                   = local.name
-  schedule_expression          = "cron(0 4,16 ? * MON-FRI *)"
+  schedule_expression          = each.value
   schedule_expression_timezone = "America/New_York"
   state                        = var.schedules_enabled ? "ENABLED" : "DISABLED"
 
@@ -123,7 +129,7 @@ resource "aws_scheduler_schedule" "cycle" {
     role_arn = aws_iam_role.cycle_scheduler.arn
     # A literal string, not jsonencode(): jsonencode escapes < and > to \u003c / \u003e, Scheduler
     # then doesn't recognise the placeholder, and the state machine gets it verbatim.
-    input = "{\"scheduled_time\": \"<aws.scheduler.scheduled-time>\", \"off_schedule\": false}"
+    input = "{\"scheduled_time\": \"<aws.scheduler.scheduled-time>\"}"
 
     # Retries of the StartExecution call only. A cycle that still starts > 1 h late aborts itself.
     retry_policy {

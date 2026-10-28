@@ -14,8 +14,7 @@
       "MaxConcurrency": 7,
       "ItemSelector": {
         "commodity.$": "$$.Map.Item.Value",
-        "scheduled_time.$": "$.scheduled_time",
-        "off_schedule.$": "$.off_schedule"
+        "scheduled_time.$": "$.scheduled_time"
       },
       "ItemProcessor": {
         "ProcessorConfig": { "Mode": "INLINE" },
@@ -53,7 +52,6 @@
       "Resource": "${portfolio_arn}",
       "Parameters": {
         "scheduled_time.$": "$.scheduled_time",
-        "off_schedule.$": "$.off_schedule",
         "results.$": "$.results"
       },
       "End": true

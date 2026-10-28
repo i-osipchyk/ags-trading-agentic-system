@@ -90,7 +90,7 @@ def test_a_failing_handler_logs_one_ags_error_line_with_the_event_ids(caplog):
         raise ValueError("boom")
 
     handle.__module__ = "ags.handlers.commodity_pipeline"
-    event = {"commodity": "coffee", "scheduled_time": "2026-10-26T20:00:00+00:00", "off_schedule": False}
+    event = {"commodity": "coffee", "scheduled_time": "2026-10-26T20:00:00+00:00"}
 
     with pytest.raises(ValueError), caplog.at_level("ERROR"):
         invoke(handle, event, build=FakeRuntime)
@@ -98,7 +98,7 @@ def test_a_failing_handler_logs_one_ags_error_line_with_the_event_ids(caplog):
     [record] = [r for r in caplog.records if r.getMessage().startswith("ags-error")]
     assert record.getMessage() == (
         "ags-error handler=commodity_pipeline commodity=coffee scheduled_time=2026-10-26T20:00:00+00:00 "
-        "off_schedule=False run_id=coffee_2026-10-26T20-00-00Z blocked=deepseek: HTTP 402: insufficient balance "
+        "run_id=coffee_2026-10-26T20-00-00Z blocked=deepseek: HTTP 402: insufficient balance "
         "error=ValueError: boom"
     )
 

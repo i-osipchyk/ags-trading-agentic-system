@@ -1,8 +1,8 @@
 from ags.notify.digest import compose_digest
 
 
-def handle(event: dict, *, storage, telegram, now) -> dict:
-    telegram.send(compose_digest(storage, now=now))
+def handle(event: dict, *, storage, telegram, now, manager_store: str = "manager") -> dict:
+    telegram.send(compose_digest(storage, now=now, manager_store=manager_store))
     return {"sent": True}
 
 

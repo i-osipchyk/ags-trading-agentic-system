@@ -124,7 +124,7 @@ def _bars(post_call_closes):
     return bars
 
 
-def _write_full_run(log_dir, call="bullish"):
+def _write_full_run(log_dir, call="bullish", price_at_call=None):
     events = [
         {"seq": 0, "agent": "weather", "event_type": "output", "payload": {"current_conditions": "WX-MARKER dry"}},
         {
@@ -138,7 +138,7 @@ def _write_full_run(log_dir, call="bullish"):
                 "key_drivers": [{"driver": "Iowa drought", "source": "weather"}],
                 "supporting_analysts": ["weather"],
                 "dissenting_analysts": [],
-                "price_at_call": {"price": 160.0, "date": CALL_DATE.isoformat()},
+                "price_at_call": price_at_call or {"price": 160.0, "date": CALL_DATE.isoformat()},
             },
         },
     ]
@@ -152,9 +152,9 @@ VERDICTS = {
 }
 
 
-def _grade(tmp_path, post_call_closes, reply=VERDICTS, call="bullish", weeks=1):
+def _grade(tmp_path, post_call_closes, reply=VERDICTS, call="bullish", weeks=1, price_at_call=None):
     log_dir, _ = _dirs(tmp_path)
-    _write_full_run(log_dir, call=call)
+    _write_full_run(log_dir, call=call, price_at_call=price_at_call)
     client = FakeChatClient(reply)
     audit = grade_checkpoint(
         client,
@@ -387,3 +387,14 @@ def test_run_auditor_writes_1d_json_beside_the_weekly_audits_and_is_idempotent(t
     again, client2, _ = _run(tmp_path)
 
     assert again["graded_diagnostics"] == [] and client2.calls == []
+
+
+def test_an_intraday_priced_call_is_graded_through_its_own_days_close(tmp_path):
+    # Called at 150.0 intraday on CALL_DATE, whose close was still ahead of the call.
+    intraday = {"kind": "intraday_quote", "price": 150.0, "date": CALL_DATE.isoformat()}
+
+    audit, _ = _grade(tmp_path, [150.0, 148.0, 146.0, 145.0, 144.0, 143.0, 144.0], price_at_call=intraday)
+
+    outcome = audit["price_outcome"]
+    assert outcome["path"][0]["date"] == CALL_DATE.isoformat()  # the call day itself is in the path
+    assert outcome["return"] == pytest.approx(144.0 / 150.0 - 1)

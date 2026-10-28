@@ -124,8 +124,11 @@ def _closes(bars: list[dict]) -> pd.Series:
 
 
 def _price_outcome(
-    data_dir: Path, *, commodity: str, call_day: date, checkpoint_at: datetime, start_price: float, prices_client
+    data_dir: Path, *, commodity: str, call_day: date, checkpoint_at: datetime, start_price: float, prices_client,
+    intraday_start: bool = False,
 ) -> dict:
+    """`intraday_start`: the call was priced from a live quote, so the call day's own close is still ahead of it
+    (it belongs to the path, not to the history the trend benchmark may see)."""
     # as_of is the checkpoint instant, so nothing newer than the checkpoint can be read.
     bars = get_prices(
         data_dir,
@@ -136,8 +139,9 @@ def _price_outcome(
         client=prices_client,
     )
     closes = _closes(bars)
-    at_call = closes[closes.index <= pd.Timestamp(call_day)]
-    path = closes[closes.index > pd.Timestamp(call_day)]
+    call_ts = pd.Timestamp(call_day)
+    at_call = closes[closes.index < call_ts] if intraday_start else closes[closes.index <= call_ts]
+    path = closes[closes.index >= call_ts] if intraday_start else closes[closes.index > call_ts]
     if path.empty:
         raise ValueError(f"no price data after {call_day} up to {checkpoint_at.date()}")
 
@@ -200,6 +204,7 @@ def grade_checkpoint(
         call_day=triggered.date(),
         checkpoint_at=checkpoint_at,
         start_price=call["price_at_call"]["price"],
+        intraday_start=call["price_at_call"].get("kind") == "intraday_quote",
         prices_client=prices_client,
     )
 

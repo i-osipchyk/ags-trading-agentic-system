@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Protocol
 
 
@@ -21,8 +23,28 @@ class Position:
     commission: float = 0.0
 
 
+def order_volume(lots: float, spec: dict) -> int:
+    """Whole `step_volume`s of `abs(lots)`, rounded toward zero; 0 when below `min_volume`."""
+    volume = int(abs(lots) * spec["lot_size"] / spec["step_volume"]) * spec["step_volume"]
+    return volume if volume >= spec["min_volume"] else 0
+
+
+def is_market_open(spec: dict, at: datetime) -> bool:
+    """Whether `at` falls in one of the symbol's trading sessions. Unknown schedule counts as open.
+
+    Holidays and early closes are not in the weekly schedule; the broker rejects those orders.
+    """
+    intervals, tz = spec.get("schedule"), spec.get("schedule_timezone")
+    if not intervals or not tz:
+        return True
+    local = at.astimezone(ZoneInfo(tz))
+    # cTrader's week starts Sunday 00:00; Python's Monday is 0.
+    seconds = ((local.weekday() + 1) % 7) * 86_400 + local.hour * 3_600 + local.minute * 60 + local.second
+    return any(start <= seconds < end for start, end in intervals)
+
+
 class Book(Protocol):
-    """Paper-only today. Deliberately has no order-routing method beyond fills of deltas."""
+    """`PaperBook` (simulated) or `DemoBook` (the Pepperstone demo account). No live implementation exists."""
 
     def apply_fills(self, deltas_lots: dict[str, float], quotes: dict, specs: dict, timestamp: str) -> list[dict]: ...
     def snapshot(self, quotes: dict, specs: dict) -> dict: ...

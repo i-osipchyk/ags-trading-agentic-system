@@ -4,7 +4,7 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from dataclasses import asdict
 
-from ags.portfolio.book import Position
+from ags.portfolio.book import Position, order_volume
 
 _UNITS_PER_VOLUME = 1 / 100
 _ET = ZoneInfo("America/New_York")
@@ -27,8 +27,8 @@ class PaperBook:
         fills = []
         for symbol, lots in deltas_lots.items():
             spec = specs[symbol]
-            volume = int(abs(lots) * spec["lot_size"] / spec["step_volume"]) * spec["step_volume"]
-            if volume < spec["min_volume"]:
+            volume = order_volume(lots, spec)
+            if not volume:
                 continue
             side = "BUY" if lots > 0 else "SELL"
             price = quotes[symbol]["ask" if side == "BUY" else "bid"]

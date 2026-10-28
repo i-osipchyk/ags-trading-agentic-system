@@ -28,8 +28,7 @@ def handle(event: dict, runtime: Runtime) -> dict:
     run_id = generate_run_id(commodity, scheduled)
     log_key = f"logs/{run_id}.jsonl"
     # A log already there means this slot was attempted: this is a retry, allowed the retry window.
-    # Off-schedule runs never retry (nor touch an official run's log beyond appending, as before).
-    earlier = None if event.get("off_schedule", False) else runtime.storage.get(log_key)
+    earlier = runtime.storage.get(log_key)
     check_late_start(event, runtime.now(), retry_window=runtime.retry_window if earlier is not None else None)
     if earlier is not None:
         call = _reusable_call(_events(earlier))

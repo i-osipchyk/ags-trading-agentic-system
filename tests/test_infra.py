@@ -113,7 +113,7 @@ def test_exactly_the_four_functions_and_no_alarm_forwarder_or_token_refresher():
 
 def test_lambda_timeouts_match_the_architecture():
     assert "timeout = 600" in _function("commodity-pipeline")
-    assert "timeout = 300" in _function("portfolio")
+    assert "timeout = 600" in _function("portfolio")  # 14 sequential demo orders at 30 s each, worst case
     assert "retries" not in _block(_module("app"), r"functions\s*=")  # module default 0
 
 
@@ -139,17 +139,18 @@ def test_functions_get_no_cost_explorer_access():
     assert "ce:" not in _tf(INFRA)
 
 
-def test_cycle_schedule_starts_the_state_machine_twice_each_weekday_in_new_york_time():
+def test_cycle_schedules_start_the_state_machine_at_0600_and_1230_new_york_time_each_weekday():
     body = _resource(MAIN, "aws_scheduler_schedule", "cycle")
-    assert 'schedule_expression          = "cron(0 4,16 ? * MON-FRI *)"' in body
+    # Inside every Pepperstone ags market's hours (see DESIGN.md), in both DST regimes.
+    assert 'morning = "cron(0 6 ? * MON-FRI *)"' in body
+    assert 'midday  = "cron(30 12 ? * MON-FRI *)"' in body
+    assert "schedule_expression          = each.value" in body
     assert 'schedule_expression_timezone = "America/New_York"' in body
     assert "arn      = aws_sfn_state_machine.cycle.arn" in body
     # The placeholder must reach Scheduler unescaped: jsonencode() would turn <> into \u003c\u003e.
     target_input = re.search(r'^\s*input\s*=\s*(.+)$', body, re.M).group(1)
     assert "jsonencode" not in target_input
-    assert json.loads(json.loads(target_input)) == {
-        "scheduled_time": "<aws.scheduler.scheduled-time>", "off_schedule": False,
-    }
+    assert json.loads(json.loads(target_input)) == {"scheduled_time": "<aws.scheduler.scheduled-time>"}
     # In the module's group (the deploy role manages schedules only there) and under the same switch.
     assert "group_name                   = local.name" in body
     assert "var.schedules_enabled" in body
@@ -240,3 +241,7 @@ def test_deploy_authenticates_with_oidc_not_stored_keys():
     assert "id-token: write" in DEPLOY
     assert "AWS_SECRET_ACCESS_KEY" not in DEPLOY
 
+
+def test_there_is_no_dry_run_flag_every_started_cycle_trades_and_records():
+    assert "off_schedule" not in (INFRA / "cycle.tf").read_text()
+    assert "off_schedule" not in (INFRA / "cycle.asl.json").read_text()
