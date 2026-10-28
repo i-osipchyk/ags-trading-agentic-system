@@ -124,7 +124,6 @@ def test_no_reserved_concurrency_while_the_account_limit_is_10():
 
 
 @pytest.mark.parametrize("name,cron", [
-    ("digest", "cron(0 5,17 ? * MON-FRI *)"),  # an hour after each cycle starts
     ("auditor", "cron(0 18 ? * MON-FRI *)"),
 ])
 def test_function_schedules_run_in_new_york_time(name, cron):
@@ -186,8 +185,18 @@ def test_cycle_state_machine_keeps_the_fixed_run_shape():
     assert inner["States"][catch["Next"]]["Parameters"]["call"] is None
 
     portfolio = states[mapper["Next"]]
-    assert portfolio["Type"] == "Task" and portfolio.get("End") is True
+    assert portfolio["Type"] == "Task" and portfolio["Next"] == "Digest"
     assert portfolio["Parameters"]["results.$"] == "$.results"
+
+    # The digest follows every cycle; its failure must not fail an execution whose books are written.
+    digest = states[portfolio["Next"]]
+    assert digest["Type"] == "Task" and digest["ResultPath"] is None and digest.get("End") is True
+    assert digest["Catch"][0]["ErrorEquals"] == ["States.ALL"]
+    assert states[digest["Catch"][0]["Next"]]["Type"] == "Pass"
+
+
+def test_digest_has_no_schedule_of_its_own():
+    assert not re.search(r"^\s*digest\s*=\s*\{\s*function", _block(_module("app"), r"schedules\s*="), re.M)
 
 
 def test_the_drawdown_breaker_trips_at_a_40_percent_drawdown():
