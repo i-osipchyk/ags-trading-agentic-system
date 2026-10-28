@@ -1,5 +1,5 @@
 {
-  "Comment": "One scheduled cycle: seven commodity pipelines in parallel, then the portfolio stage. Fixed run shape.",
+  "Comment": "One scheduled cycle: seven commodity pipelines in parallel, then the portfolio stage, then the Telegram digest. Fixed run shape.",
   "StartAt": "Commodities",
   "States": {
     "Commodities": {
@@ -54,6 +54,20 @@
         "scheduled_time.$": "$.scheduled_time",
         "results.$": "$.results"
       },
+      "Next": "Digest"
+    },
+    "Digest": {
+      "Type": "Task",
+      "Resource": "${digest_arn}",
+      "ResultPath": null,
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.digest_error", "Next": "DigestFailed" }
+      ],
+      "End": true
+    },
+    "DigestFailed": {
+      "Type": "Pass",
+      "Comment": "A failed notification must not fail a cycle whose books are already written; the digest Lambda's error alarm reports it.",
       "End": true
     }
   }

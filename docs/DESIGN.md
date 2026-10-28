@@ -35,7 +35,7 @@ Scheduled: **06:00 and 12:30 ET, Monday–Friday**, no weekend runs. These are t
    4. Code fills the surviving deltas on the paper book (Pepperstone-faithful costs), and runs the shadow book's mechanical sizer through the same guardrails and fills.
 4. Everything (inputs, intermediate agent outputs, calls, raw and post-guardrail proposals, violations, fills) is logged under `run_id` / `cycle_id`, with every fetched data point tagged with its `as_of` capture timestamp.
 5. Auditor runs separately, on a lag, grading each `run_id` at 1 day (diagnostic) and 1, 2, 4, and 8 weeks after it fired (see Auditor).
-6. A digest goes out at 05:00 and 17:00 ET on weekdays, after each cycle; failures alert immediately (see Notifications).
+6. A digest goes out as the last step of every cycle (06:00 and 12:30 ET starts, weekdays); failures alert immediately (see Notifications).
 
 ## Technical analyst
 
@@ -258,7 +258,7 @@ The manager's value is **manager P&L − shadow P&L**. Both books trade the same
 Telegram, one chat:
 
 - **Alerts (immediate):** cycle execution failed; a commodity failed two cycles in a row; drawdown breaker tripped; cTrader token refresh failed (platform alarm); Lambda error alarms.
-- **Digest (05:00 and 17:00 ET, weekdays — an hour after each cycle starts):** every change is against the previous cycle.
+- **Digest (last step of each cycle, 06:00 and 12:30 ET starts, weekdays):** every change is against the previous cycle.
   1. **Spend** — LLM cost of the latest cycle (its runs, portfolio stage and retried attempts) by agent and by commodity, plus the month-to-date total. No AWS cost: that's the platform budget's job.
   2. **Book** — for the manager and the shadow book: closing equity and its change, total position value (gross, at the cycle's marks), margin used and its share of equity, and for each of the seven commodities lots and USD value with their changes. Then manager − shadow equity and its change.
   3. **Latest calls** — seven rows: direction and conviction, next to the previous cycle's.

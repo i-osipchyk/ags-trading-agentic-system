@@ -28,6 +28,7 @@ data "aws_iam_policy_document" "sfn" {
     resources = [
       module.app.function_arns["commodity-pipeline"],
       module.app.function_arns["portfolio"],
+      module.app.function_arns["digest"],
     ]
   }
 
@@ -60,6 +61,7 @@ resource "aws_sfn_state_machine" "cycle" {
   definition = templatefile("${path.module}/cycle.asl.json", {
     commodity_pipeline_arn = module.app.function_arns["commodity-pipeline"]
     portfolio_arn          = module.app.function_arns["portfolio"]
+    digest_arn             = module.app.function_arns["digest"]
   })
 
   logging_configuration {

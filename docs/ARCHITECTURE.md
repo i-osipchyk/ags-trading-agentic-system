@@ -413,8 +413,8 @@ EventBridge Scheduler  cron(0 4,16 ? * MON-FRI *)  tz America/New_York
   └─ Step Functions "ags-live-cycle"  (input: cycle_id, scheduled_time)
        ├─ Map ×7 (parallel) → Lambda commodity-pipeline(commodity)
        │     retry 2× with backoff; Catch → {commodity, failed: true}
-       └─ Lambda portfolio(cycle_id, commodity results)
-Scheduler (weekdays 05:00 + 17:00 ET) → Lambda digest
+       ├─ Lambda portfolio(cycle_id, commodity results)
+       └─ Lambda digest  (Catch → Pass: a failed digest never fails the cycle)
 Scheduler (weekdays 18:00 ET) → Lambda auditor
 CloudWatch alarms (execution failed, Lambda errors) → SNS platform-alarms → Telegram
 scripts/retry_cycle.py (by hand) → Step Functions, same slot, within the retry window
@@ -606,8 +606,8 @@ the shared pair with the developer's AWS credentials for any `CTRADER_*` key
   provider error, credit running low, manager failed, commodity failed two
   cycles running, breaker tripped). A failed cTrader token refresh alarms
   from the platform.
-- **Digest:** the `digest` Lambda runs at 05:00 and 17:00 ET on weekdays and
-  reads the latest two cycle files of each book and the run logs from S3. LLM
+- **Digest:** the `digest` Lambda is the last step of the cycle state machine, so a
+  digest follows every cycle, and reads the latest two cycle files of each book and the run logs from S3. LLM
   spend is summed from the per-call `usage.cost_usd` that llmkit priced and
   the LLM layer records in run logs — the latest cycle's runs, portfolio log
   and their `attempts/` by agent and by commodity, plus the month-to-date

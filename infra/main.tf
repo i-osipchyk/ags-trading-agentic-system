@@ -34,9 +34,9 @@ module "app" {
   }
 
   # America/New_York regardless of the deployment region. The twice-daily cycle starts the state
-  # machine, which the module's scheduler role can't, so it lives in cycle.tf.
+  # machine, which the module's scheduler role can't, so it lives in cycle.tf. The digest is the
+  # state machine's last step, so it has no schedule of its own.
   schedules = {
-    digest  = { function = "digest", expression = "cron(0 5,17 ? * MON-FRI *)", timezone = "America/New_York" }
     auditor = { function = "auditor", expression = "cron(0 18 ? * MON-FRI *)", timezone = "America/New_York" }
   }
   schedules_enabled = var.schedules_enabled
