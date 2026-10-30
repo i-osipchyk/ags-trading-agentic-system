@@ -41,7 +41,7 @@ src/ags/
       conab.py       # Brazilian crop supply
       iso.py         # International Sugar Organization
       prices.py      # cTrader Open API, crochet-wrapped
-      weather.py     # US Drought Monitor + NOAA CPC
+      weather.py     # US Drought Monitor + NOAA CPC + Open-Meteo (non-US)
       news.py        # Tavily
       cot.py         # CFTC positioning archive
       # ico.py / iccо.py / icac.py added lazily, per commodity, as needed
@@ -351,12 +351,19 @@ past calls against how they graded out, and adjust emphasis accordingly
 | ICO / ICCO / ICAC | Coffee / cocoa / cotton supply-demand | Same scrape/parse pattern; built lazily, one per commodity, only when that commodity is actually worked on |
 | US Drought Monitor | Weather analyst — drought/severity | Weekly, dated, never-revised archive — direct PIT fit |
 | NOAA CPC | Weather analyst — temp/precip outlooks | Archived, dated outlook products ("as issued," not reanalysis) |
+| Open-Meteo forecast API | Weather analyst — non-US regions (past 14 days + next 7: precipitation, min/max temperature) | Live forecast, not an archive: fetched every cycle and each pull archived under the cycle's timestamp (`open_meteo/forecast/<region>/`). Free tier is non-commercial; CC BY 4.0 |
 | CFTC COT archive | `get_positioning` | Weekly dated archive, same scrape/parse pattern |
 
-**Weather scope:** US Drought Monitor + NOAA CPC are US-only. Coffee,
-cocoa, and sugar (Brazil/India/West Africa-heavy) get thinner weather input
-this cycle as a result. A global source is an explicit "revisit after the
-2-month review" item, not built now.
+**Weather scope:** each commodity's analyst is offered a fixed region list
+(`regions_for` in `tools/sources/weather.py`): US states for the grains
+(Drought Monitor + CPC); Brazil/Vietnam/Colombia for coffee, Brazil
+Center-South/India/Thailand for sugar, Ivory Coast/Ghana for cocoa, and the
+US cotton belt plus Brazil/India/China for cotton, the non-US ones through
+Open-Meteo point forecasts. Non-US regions have no drought index and no
+seasonal-outlook probabilities, only recent and forecast rainfall and
+temperature (min temperature for frost). Open-Meteo's free forecast API cannot
+be re-queried for a past `as_of`, so this input is live-only; counterfactual
+replay reuses the logged analyst outputs and never re-fetches it.
 
 **Correction to the design doc's source list:** "ISMA" (listed alongside
 USDA/UNICA/Conab/ISO in both `CLAUDE.md` and the v2 design doc) does not
