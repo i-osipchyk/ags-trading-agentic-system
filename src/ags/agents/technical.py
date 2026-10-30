@@ -8,6 +8,7 @@ from ags.agents.output import of, parse_reply
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.chart import get_chart_snapshot as compute_chart_snapshot
 from ags.tools.pit_store import ET
+from ags.tools.sources.cot import CotClient, get_positioning as fetch_positioning
 from ags.tools.seasonality import get_seasonality as compute_seasonality
 from ags.tools.sources.prices import (
     INTRADAY_MAX_DAYS,
@@ -41,6 +42,8 @@ chart looks like from the raw candles and EMAs below.
 Known facts as of {as_of}:
   trend: {trend}
   volatility: {volatility}
+  positioning (CFTC managed-money net position, latest weekly report public at that time; \
+percentile ranks net % of open interest against the previous three years): {positioning}
   latest {chart_lookback_candles} candles (OHLCV + EMAs): {chart_snapshot}
 
 {intraday}
@@ -95,6 +98,7 @@ def run_technical_analyst(
     as_of: datetime,
     model: str,
     prices_client: PricesClient | None = None,
+    cot_client: CotClient | None = None,
     reference_quote: dict | None = None,
     now: datetime | None = None,
     history_days: int = _DEFAULT_HISTORY_DAYS,
@@ -106,6 +110,13 @@ def run_technical_analyst(
     series = None
     chart_snapshot = None
     last_bar = None
+
+    positioning = None
+    if cot_client is not None:
+        try:
+            positioning = fetch_positioning(data_dir, symbol=commodity, as_of=as_of, client=cot_client)
+        except Exception:
+            degraded = True
 
     as_of_day = as_of.astimezone(ET).date()
     history_start = as_of_day - timedelta(days=history_days)
@@ -200,6 +211,7 @@ def run_technical_analyst(
         as_of=as_of.isoformat(),
         trend=trend,
         volatility=volatility,
+        positioning=json.dumps(positioning) if positioning is not None else "unavailable",
         chart_lookback_candles=chart_lookback_candles,
         max_bars=_MAX_INTRADAY_BARS,
         intraday=describe_intraday(reference_quote, last_bar),
@@ -220,6 +232,7 @@ def run_technical_analyst(
     return {
         "trend": trend,
         "volatility": volatility,
+        "positioning": positioning,
         "seasonality_alignment": parsed.get("seasonality_alignment"),
         "key_levels": parsed.get("key_levels"),
         "chart_description": parsed.get("chart_description"),

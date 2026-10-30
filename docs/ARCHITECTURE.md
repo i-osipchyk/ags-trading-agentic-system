@@ -351,7 +351,7 @@ past calls against how they graded out, and adjust emphasis accordingly
 | ICO / ICCO / ICAC | Coffee / cocoa / cotton supply-demand | Same scrape/parse pattern; built lazily, one per commodity, only when that commodity is actually worked on |
 | US Drought Monitor | Weather analyst — drought/severity | Weekly, dated, never-revised archive — direct PIT fit |
 | NOAA CPC | Weather analyst — temp/precip outlooks | Archived, dated outlook products ("as issued," not reanalysis) |
-| CFTC COT archive | `get_positioning` | Weekly dated archive, same scrape/parse pattern |
+| CFTC COT (Public Reporting API, disaggregated futures-only) | Technical analyst, as a code-computed `positioning` fact in its prompt and output | Weekly, published Friday 15:30 ET for the Tuesday before. Managed-money net, net % of open interest and its rank over the previous 156 weeks, from the latest report public at `as_of`. Fetched every cycle, each release archived once under `cftc_cot/managed_money/<symbol>/`. Local `scripts/run_*` runs pass no COT client and skip it |
 
 **Weather scope:** US Drought Monitor + NOAA CPC are US-only. Coffee,
 cocoa, and sugar (Brazil/India/West Africa-heavy) get thinner weather input

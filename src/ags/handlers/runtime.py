@@ -6,6 +6,7 @@ from ags.config import Config
 from ags.notify.balances import provider_balances
 from ags.portfolio.stage import PortfolioConfig
 from ags.storage import S3Storage, Storage
+from ags.tools.sources.cot import SocrataCotClient
 
 LATE_START_LIMIT = timedelta(hours=1)
 # A slot that was attempted but never reached the book (a held cycle) may be retried this late.
@@ -30,6 +31,7 @@ class Runtime:
     news_client: object = None
     weather_client: object = None
     usda_client: object = None
+    cot_client: object = None
     portfolio_config: PortfolioConfig | None = None
     breaker_reset_at: Callable[[], datetime | None] = lambda: None
     alert: Callable[[str], None] = lambda message: None
@@ -98,6 +100,7 @@ def build_runtime(
     return Runtime(
         config=config, storage=S3Storage(env["AGS_BUCKET"]),
         chat_client=chat_factory(config), model=config.deepseek_model, market_client=market_factory(config),
+        cot_client=SocrataCotClient(),
         now=lambda: datetime.now(timezone.utc), portfolio_config=PortfolioConfig.from_mapping(env),
         breaker_reset_at=breaker_reset_at, alert=alert_factory(config) if alert_factory else (lambda message: None),
         retry_window=retry_window_from(env), balances=lambda: provider_balances(config),
