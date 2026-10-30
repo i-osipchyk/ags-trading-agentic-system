@@ -206,8 +206,9 @@ def get_usda_report(data_dir, *, report: str, symbol: str, as_of: datetime, clie
 
     just_before_latest = release_instant(SOURCE, date.fromisoformat(latest["release_date"])) - timedelta(microseconds=1)
     prior = _get_release(data_dir, report=report, symbol=symbol, as_of=just_before_latest, client=client)
-    result["prior"] = prior
-    if prior is not None:
+    # A release for another marketing year is a different balance sheet, not an earlier view of this one.
+    if prior is not None and prior["marketing_year"] == latest["marketing_year"]:
+        result["prior"] = prior
         change = {k: round(latest[k] - prior[k], 4) for k in _FIGURES}
         result["change"] = change
         result["revision_direction"] = _direction(change["ending_stocks"])
