@@ -138,6 +138,7 @@ def run_pipeline(
     weather_client=None,
     usda_client=None,
     cot_client=None,
+    grinds_client=None,
     replace_log: bool = False,
     now: datetime | None = None,
 ) -> dict:
@@ -151,13 +152,13 @@ def run_pipeline(
     try:
         with trace(chat_client, run_id):
             return _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
-                        log_store, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, cot_client, now)
+                        log_store, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, cot_client, grinds_client, now)
     finally:
         raw_log.close()
 
 
 def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
-         log_dir, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, cot_client, now) -> dict:
+         log_dir, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, cot_client, grinds_client, now) -> dict:
     reference = _reference_quote(data_dir, commodity, as_of, prices_client, now)
     run_log = _SharedRunLog(raw_log)
     common = {"commodity": commodity, "as_of": as_of, "model": model}
@@ -180,7 +181,7 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
             data_dir, _client("weather"), weather_client=weather_client, **common
         ),
         "supply_demand": lambda: run_supply_demand_analyst(
-            data_dir, _client("supply_demand"), usda_client=usda_client, **common
+            data_dir, _client("supply_demand"), usda_client=usda_client, grinds_client=grinds_client, **common
         ),
     }
 

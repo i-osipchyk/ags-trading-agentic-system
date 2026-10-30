@@ -67,7 +67,7 @@ def test_run_supply_demand_analyst_returns_schema_conformant_output_for_one_symb
         tmp_path, chat_client, commodity="corn", as_of=as_of, model="deepseek-chat", usda_client=usda_client
     )
 
-    assert set(result.keys()) == {"latest_report", "key_figures", "stocks_to_use", "degraded"}
+    assert set(result.keys()) == {"latest_report", "key_figures", "stocks_to_use", "demand_indicators", "degraded"}
     assert result["latest_report"] == ANALYST_JSON["latest_report"]
     assert result["key_figures"] == ANALYST_JSON["key_figures"]
     assert result["stocks_to_use"] == ANALYST_JSON["stocks_to_use"]
@@ -121,7 +121,8 @@ def test_run_supply_demand_analyst_surfaces_degraded_true_when_the_model_returns
     )
 
     assert result == {
-        "latest_report": None, "key_figures": [], "stocks_to_use": None, "unparsed_reply": "not valid json", "degraded": True,
+        "latest_report": None, "key_figures": [], "stocks_to_use": None, "demand_indicators": None,
+        "unparsed_reply": "not valid json", "degraded": True,
     }
 
 
@@ -187,3 +188,55 @@ def test_run_supply_demand_analyst_degrades_after_a_single_retry_when_the_reply_
 
     assert result["degraded"] is True
     assert len(chat_client.calls) == 2
+
+
+GRINDS = {
+    "europe": {"quarter": "2026-Q3", "published": "2026-10-15", "tonnes": 348215, "yoy_pct": 3.22},
+    "asia": {"quarter": "2026-Q3", "published": "2026-10-15", "tonnes": None, "yoy_pct": 29.22},
+}
+
+COCOA_REPLY = {
+    "latest_report": {"name": "Q3 2026 cocoa grind releases (ECA, NCA, CAA)", "date": "2026-10-15"},
+    "key_figures": [{"figure": "Europe Q3 2026 grind (t)", "value": 348215, "prior": None, "revision_direction": "up"}],
+    "stocks_to_use": None,
+}
+
+
+class FakeGrindsClient:
+    def __init__(self, by_region):
+        self._by_region = by_region
+
+    def get_release(self, region, *, as_of):
+        return self._by_region.get(region)
+
+
+def _run_cocoa(tmp_path, grinds_by_region):
+    chat_client = FakeChatClient(
+        responses=[{"role": "assistant", "content": json.dumps(COCOA_REPLY), "tool_calls": None}]
+    )
+    result = run_supply_demand_analyst(
+        tmp_path,
+        chat_client,
+        commodity="cocoa",
+        as_of=datetime(2026, 10, 16, 6, 0, tzinfo=ET),
+        model="deepseek-chat",
+        grinds_client=FakeGrindsClient(grinds_by_region),
+    )
+    return result, chat_client
+
+
+def test_run_supply_demand_analyst_for_cocoa_reads_the_grind_releases_instead_of_usda_reports(tmp_path):
+    result, chat_client = _run_cocoa(tmp_path, GRINDS)
+
+    assert result["demand_indicators"] == GRINDS
+    assert result["latest_report"] == COCOA_REPLY["latest_report"]
+    assert result["degraded"] is False  # the USDA has no cocoa report, which is not a gap
+    assert not chat_client.calls[0]["tools"]  # no tool offered: nothing the USDA could return
+    assert json.dumps(GRINDS["europe"]) in chat_client.calls[0]["messages"][0]["content"]
+
+
+def test_run_supply_demand_analyst_for_cocoa_is_degraded_when_a_region_is_missing_but_keeps_the_rest(tmp_path):
+    result, _ = _run_cocoa(tmp_path, {"europe": GRINDS["europe"]})
+
+    assert result["degraded"] is True
+    assert result["demand_indicators"] == {"europe": GRINDS["europe"], "asia": None}
