@@ -1,6 +1,6 @@
 import io
 import zipfile
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Protocol
 
 import requests
@@ -12,8 +12,11 @@ SOURCE_DROUGHT = "usdm"
 REPORT_DROUGHT = "drought_severity"
 SOURCE_OUTLOOK = "noaa_cpc"
 REPORT_OUTLOOK = "monthly_outlook"
+SOURCE_FORECAST = "open_meteo"
+REPORT_FORECAST = "forecast"
 
 _USDM_URL = "https://usdmdataservices.unl.edu/api/StateStatistics/GetDroughtSeverityStatisticsByArea"
+_OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 _CPC_BASE_URL = "https://ftp.cpc.ncep.noaa.gov/GIS/us_tempprcpfcst/monthlyupdate"
 
 # US ag-belt states covered this stage (corn/soy/wheat/cotton/sugar-beet
@@ -46,12 +49,44 @@ _STATES = {
 }
 
 
+# Non-US growing regions, queried through Open-Meteo by representative point (lat, lon).
+_OPEN_METEO_POINTS = {
+    "BR-MG": {"lat": -21.2, "lon": -45.0},  # Minas Gerais, Brazil's main arabica state
+    "BR-SP": {"lat": -20.5, "lon": -47.5},  # Sao Paulo (Alta Mogiana)
+    "BR-ES": {"lat": -19.5, "lon": -40.7},  # Espirito Santo (conilon robusta)
+    "VN-DL": {"lat": 12.67, "lon": 108.04},  # Dak Lak, Vietnam's robusta heartland
+    "CO-HU": {"lat": 2.5, "lon": -75.5},  # Huila, Colombia
+    "BR-CS": {"lat": -21.2, "lon": -47.8},  # Center-South cane belt (Ribeirao Preto)
+    "IN-MH": {"lat": 19.0, "lon": 75.0},  # Maharashtra, India's top cane state
+    "IN-KA": {"lat": 15.3, "lon": 75.7},  # Karnataka
+    "TH": {"lat": 15.0, "lon": 100.0},  # Thailand's central cane belt
+    "CI": {"lat": 6.8, "lon": -5.3},  # Ivory Coast cocoa belt
+    "GH": {"lat": 6.7, "lon": -1.6},  # Ghana cocoa belt (Ashanti)
+    "BR-MT": {"lat": -13.0, "lon": -56.0},  # Mato Grosso cotton
+    "IN-GJ": {"lat": 22.3, "lon": 71.8},  # Gujarat cotton
+    "CN-XJ": {"lat": 41.5, "lon": 85.0},  # Xinjiang cotton
+}
+
+# Regions each commodity's analyst may query. A commodity not listed here is a US row crop and gets every
+# supported US state.
+_REGIONS_BY_COMMODITY = {
+    "coffee": ("BR-ES", "BR-MG", "BR-SP", "CO-HU", "VN-DL"),
+    "sugar": ("BR-CS", "IN-KA", "IN-MH", "TH"),
+    "cocoa": ("CI", "GH"),
+    "cotton": ("AL", "AR", "BR-MT", "CN-XJ", "GA", "IN-GJ", "LA", "MO", "MS", "NC", "SC", "TN", "TX"),
+}
+
 SUPPORTED_REGIONS = tuple(sorted(_STATES))
+
+
+def regions_for(commodity: str) -> tuple[str, ...]:
+    return _REGIONS_BY_COMMODITY.get(commodity, SUPPORTED_REGIONS)
 
 
 class WeatherClient(Protocol):
     def get_drought_conditions(self, region: str, *, as_of: datetime) -> dict | None: ...
     def get_outlook(self, region: str, *, as_of: datetime) -> dict | None: ...
+    def get_forecast(self, region: str, *, as_of: datetime) -> dict | None: ...
 
 
 class DroughtMonitorClient:
@@ -179,12 +214,58 @@ class CpcOutlookClient:
         }
 
 
+def _summarise(days: list[tuple[float, float, float]]) -> dict:
+    return {
+        "precip_mm": round(sum(precip for precip, _, _ in days), 1),
+        "tmin_c": min(tmin for _, tmin, _ in days),
+        "tmax_c": max(tmax for _, _, tmax in days),
+    }
+
+
+class OpenMeteoClient:
+    """Open-Meteo forecast API (api.open-meteo.com): the past 14 days and the next 7 for a point."""
+
+    def get_forecast(self, region: str, *, as_of: datetime) -> dict | None:
+        point = _OPEN_METEO_POINTS[region]
+        today = as_of.astimezone(timezone.utc).date()
+        response = requests.get(
+            _OPEN_METEO_URL,
+            params={
+                "latitude": point["lat"],
+                "longitude": point["lon"],
+                "daily": "precipitation_sum,temperature_2m_min,temperature_2m_max",
+                "past_days": 14,
+                "forecast_days": 7,
+                "timezone": "UTC",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        daily = response.json()["daily"]
+        rows = list(
+            zip(
+                (date.fromisoformat(day) for day in daily["time"]),
+                zip(daily["precipitation_sum"], daily["temperature_2m_min"], daily["temperature_2m_max"]),
+            )
+        )
+        return {
+            "issued": today.isoformat(),
+            "past_14d": _summarise([values for day, values in rows if day < today]),
+            "next_7d": _summarise([values for day, values in rows if day >= today]),
+        }
+
+
 class USWeatherClient:
-    """Combines DroughtMonitorClient + CpcOutlookClient behind the WeatherClient protocol."""
+    """Combines DroughtMonitorClient + CpcOutlookClient (US) and OpenMeteoClient (elsewhere) behind the
+    WeatherClient protocol."""
 
     def __init__(self):
         self._drought = DroughtMonitorClient()
         self._outlook = CpcOutlookClient()
+        self._forecast = OpenMeteoClient()
+
+    def get_forecast(self, region: str, *, as_of: datetime) -> dict | None:
+        return self._forecast.get_forecast(region, as_of=as_of)
 
     def get_drought_conditions(self, region: str, *, as_of: datetime) -> dict | None:
         return self._drought.get_drought_conditions(region, as_of=as_of)
@@ -241,9 +322,22 @@ def _get_outlook(data_dir, *, region: str, as_of: datetime, client: WeatherClien
     return record
 
 
+def _get_forecast(data_dir, *, region: str, as_of: datetime, client: WeatherClient) -> dict | None:
+    # A forecast goes stale within hours, so unlike the weekly drought map it is fetched every cycle (never
+    # served from the PIT store); each pull is archived under the cycle's own timestamp.
+    record = client.get_forecast(region, as_of=as_of)
+    if record is not None:
+        write_pit(
+            data_dir, source=SOURCE_FORECAST, report=REPORT_FORECAST, symbol=region, release_date=as_of, content=record
+        )
+    return record
+
+
 def get_weather(data_dir, *, region: str, as_of: datetime, client: WeatherClient | None = None) -> dict:
     if client is None:
         client = USWeatherClient()
+    if region in _OPEN_METEO_POINTS:
+        return {"region": region, "forecast": _get_forecast(data_dir, region=region, as_of=as_of, client=client)}
     drought = _get_drought(data_dir, region=region, as_of=as_of, client=client)
     outlook = _get_outlook(data_dir, region=region, as_of=as_of, client=client)
     return {"region": region, "drought": drought, "outlook": outlook}

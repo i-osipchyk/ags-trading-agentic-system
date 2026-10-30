@@ -42,7 +42,7 @@ def handle(event: dict, runtime: Runtime) -> dict:
         log_dir=Prefixed(runtime.storage, "logs"), data_dir=Prefixed(runtime.storage, "data"),
         audit_dir=Prefixed(runtime.storage, "audits"), prices_client=runtime.market_client,
         news_client=runtime.news_client, weather_client=runtime.weather_client, usda_client=runtime.usda_client,
-        replace_log=earlier is not None,
+        cot_client=runtime.cot_client, grinds_client=runtime.grinds_client, replace_log=earlier is not None,
     )
     blocked = blockers.seen()
     if blocked:

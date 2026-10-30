@@ -90,6 +90,7 @@ def test_run_technical_analyst_returns_schema_conformant_output_for_one_symbol(t
     assert set(result.keys()) == {
         "trend",
         "volatility",
+        "positioning",
         "seasonality_alignment",
         "key_levels",
         "chart_description",
@@ -305,3 +306,89 @@ def test_a_replayed_run_never_fetches_lower_timeframe_bars_live(tmp_path):
     result, _, client = _ask_for(tmp_path, {"start": "2026-06-05", "end": "2026-06-05", "tf": "H1"}, now=long_after)
 
     assert result["bars"] == [] and not any(c[0] == "bars" for c in client.calls)
+
+
+class FakeCotClient:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def get_reports(self, symbol, *, start, end):
+        return list(self._rows)
+
+
+def _cot_row(report_date: str, long: int, short: int) -> dict:
+    return {"report_date": report_date, "open_interest": 1000, "managed_money_long": long, "managed_money_short": short}
+
+
+def test_run_technical_analyst_adds_the_latest_released_positioning_as_a_computed_fact(tmp_path):
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)  # Friday: the Tue 2026-06-02 report is out at 15:30 ET
+    # Managed-money net of 10%, 30% and (latest) 20% of open interest: 2 of the 3 weeks are at or below 20%.
+    cot_client = FakeCotClient(
+        [_cot_row("2026-05-19", 110, 10), _cot_row("2026-05-26", 330, 30), _cot_row("2026-06-02", 300, 100)]
+    )
+    chat_client = FakeChatClient(
+        responses=[
+            {
+                "role": "assistant",
+                "content": json.dumps({"seasonality_alignment": "typical", "key_levels": {}, "chart_description": "flat"}),
+                "tool_calls": None,
+            }
+        ]
+    )
+
+    result = run_technical_analyst(
+        tmp_path,
+        chat_client,
+        commodity="corn",
+        as_of=as_of,
+        model="deepseek-chat",
+        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of.date())}),
+        history_days=550,
+        cot_client=cot_client,
+    )
+
+    expected = {
+        "report_date": "2026-06-02",
+        "released": "2026-06-05",
+        "managed_money_net": 200,
+        "open_interest": 1000,
+        "net_pct_oi": 20.0,
+        "percentile": 66.67,
+        "weeks": 3,
+    }
+    assert result["positioning"] == expected
+    assert json.dumps(expected) in chat_client.calls[0]["messages"][0]["content"]
+
+
+class FailingCotClient:
+    def get_reports(self, symbol, *, start, end):
+        raise ConnectionError("publicreporting.cftc.gov unreachable")
+
+
+def test_run_technical_analyst_degrades_but_keeps_everything_else_when_positioning_is_unavailable(tmp_path):
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
+    chat_client = FakeChatClient(
+        responses=[
+            {
+                "role": "assistant",
+                "content": json.dumps({"seasonality_alignment": "typical", "key_levels": {}, "chart_description": "flat"}),
+                "tool_calls": None,
+            }
+        ]
+    )
+
+    result = run_technical_analyst(
+        tmp_path,
+        chat_client,
+        commodity="corn",
+        as_of=as_of,
+        model="deepseek-chat",
+        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of.date())}),
+        history_days=550,
+        cot_client=FailingCotClient(),
+    )
+
+    assert result["positioning"] is None
+    assert result["degraded"] is True
+    assert result["trend"]["short"]["state"] == "up"  # the price-derived facts are untouched
+    assert "positioning" in chat_client.calls[0]["messages"][0]["content"]

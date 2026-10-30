@@ -26,3 +26,10 @@ def test_get_growing_calendar_reports_us_winter_wheat_dormant_in_december():
     result = get_growing_calendar("wheat", as_of=datetime(2026, 12, 15, 16, 0, tzinfo=ET))
 
     assert result == {"stage": "dormant"}
+
+
+def test_get_growing_calendar_follows_the_brazil_center_south_cane_crush_for_sugar():
+    # ICE No.11 is priced off Brazil's Center-South, whose crush runs roughly April to November and peaks
+    # mid-year (UNICA reports weekly crush through that season); January-March is the growing season.
+    assert get_growing_calendar("sugar", as_of=datetime(2026, 7, 15, 16, 0, tzinfo=ET)) == {"stage": "harvest"}
+    assert get_growing_calendar("sugar", as_of=datetime(2026, 1, 15, 16, 0, tzinfo=ET)) == {"stage": "vegetative"}

@@ -1,9 +1,8 @@
 from datetime import date
 
-# Month -> stage, by commodity. Northern-Hemisphere, US-growing-region
-# calendars (the regions get_weather actually covers per ARCHITECTURE.md) —
-# sugar/coffee/cocoa are non-US-dominant crops and get the same "thinner"
-# treatment already accepted there, not a new caveat introduced here.
+# Month -> stage, by commodity, for the regions get_weather covers for that commodity: the US crops are
+# Northern-Hemisphere US calendars; sugar, coffee and cocoa follow their dominant producers (Brazil
+# Center-South, Brazil, West Africa).
 _CALENDARS: dict[str, dict[int, str]] = {
     "corn": {
         1: "dormant", 2: "dormant", 3: "dormant",
@@ -44,12 +43,11 @@ _CALENDARS: dict[str, dict[int, str]] = {
         12: "dormant",
     },
     "sugar": {
-        # US sugar beet belt (ND/MN) used as the row-crop proxy.
-        1: "dormant", 2: "dormant", 3: "dormant",
-        4: "planting", 5: "planting",
-        6: "vegetative", 7: "vegetative", 8: "vegetative",
-        9: "harvest", 10: "harvest",
-        11: "dormant", 12: "dormant",
+        # Brazil Center-South cane (the ICE No.11 price driver): crush April-November, regrowth otherwise.
+        1: "vegetative", 2: "vegetative", 3: "vegetative",
+        4: "harvest", 5: "harvest", 6: "harvest", 7: "harvest", 8: "harvest", 9: "harvest",
+        10: "harvest", 11: "harvest",
+        12: "vegetative",
     },
     "coffee": {
         # Brazil-centric (Southern Hemisphere) — seasons are shifted

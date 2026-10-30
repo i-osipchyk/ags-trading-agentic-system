@@ -111,7 +111,7 @@ def test_get_balance_sheet_revisions_has_no_trend_without_a_prior_release(tmp_pa
 
 COFFEE_DEC = {
     "release_date": "2024-12-18",
-    "marketing_year": "2024/25",
+    "marketing_year": "2025/26",
     "ending_stocks": 21752.0,
     "stocks_to_use": 13.06,
 }
@@ -135,3 +135,32 @@ def test_get_balance_sheet_revisions_for_coffee_reads_the_coffee_report_not_wasd
         "stocks_to_use_change": 0.41,
         "stocks_to_use_trend": "loosening",
     }
+
+
+COFFEE_DEC_2025 = {
+    "release_date": "2025-12-18",
+    "marketing_year": "2025/26",
+    "ending_stocks": 20148.0,
+    "stocks_to_use": 11.59,
+}
+COFFEE_JUL_2026 = {
+    "release_date": "2026-07-22",
+    "marketing_year": "2026/27",
+    "ending_stocks": 26283.0,
+    "stocks_to_use": 14.62,
+}
+
+
+def test_a_prior_release_for_another_marketing_year_is_not_a_revision(tmp_path):
+    # The Jul 2026 edition opens 2026/27; the Dec 2025 edition before it is the 2025/26 balance sheet, so
+    # the gap between them is a new year's forecast, not a revision.
+    client = FakeUsdaClient({"coffee": [COFFEE_DEC_2025, COFFEE_JUL_2026]})
+    as_of = datetime(2026, 10, 30, 10, 0, tzinfo=ET)
+
+    report = get_usda_report(tmp_path, report="coffee_world_markets", symbol="coffee", as_of=as_of, client=client)
+    revisions = get_balance_sheet_revisions(tmp_path, symbol="coffee", as_of=as_of, client=client)
+
+    assert report["latest"] == COFFEE_JUL_2026
+    assert report["prior"] is None
+    assert "change" not in report
+    assert revisions == {"symbol": "coffee", "ending_stocks_change": None, "stocks_to_use_change": None, "stocks_to_use_trend": None}

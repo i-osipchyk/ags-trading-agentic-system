@@ -41,7 +41,7 @@ src/ags/
       conab.py       # Brazilian crop supply
       iso.py         # International Sugar Organization
       prices.py      # cTrader Open API, crochet-wrapped
-      weather.py     # US Drought Monitor + NOAA CPC
+      weather.py     # US Drought Monitor + NOAA CPC + Open-Meteo (non-US)
       news.py        # Tavily
       cot.py         # CFTC positioning archive
       # ico.py / iccо.py / icac.py added lazily, per commodity, as needed
@@ -351,12 +351,20 @@ past calls against how they graded out, and adjust emphasis accordingly
 | ICO / ICCO / ICAC | Coffee / cocoa / cotton supply-demand | Same scrape/parse pattern; built lazily, one per commodity, only when that commodity is actually worked on |
 | US Drought Monitor | Weather analyst — drought/severity | Weekly, dated, never-revised archive — direct PIT fit |
 | NOAA CPC | Weather analyst — temp/precip outlooks | Archived, dated outlook products ("as issued," not reanalysis) |
-| CFTC COT archive | `get_positioning` | Weekly dated archive, same scrape/parse pattern |
+| Open-Meteo forecast API | Weather analyst — non-US regions (past 14 days + next 7: precipitation, min/max temperature) | Live forecast, not an archive: fetched every cycle and each pull archived under the cycle's timestamp (`open_meteo/forecast/<region>/`). Free tier is non-commercial; CC BY 4.0 |
+| Cocoa grind releases: ECA (Europe), CAA (Asia); NCA (North America) is parsed but not requested | Supply/demand analyst for cocoa, as code-computed facts in its prompt and a `demand_indicators` output field (replaces the USDA tools, which have no cocoa report) | Quarterly, ~2 weeks after quarter end, PDFs. Latest quarter per region: tonnes (not Asia, chart-only) and year-on-year %. Date-only releases count as public from the end of their day; each release archived once per region under `cocoa_grinds/quarterly/<region>/`. A region that fails or changes layout is `null` and marks the run degraded. NCA is left out because its site blocks non-browser clients (HTTP 403 on its listing page, 401 on its REST API) |
+| CFTC COT (Public Reporting API, disaggregated futures-only) | Technical analyst, as a code-computed `positioning` fact in its prompt and output | Weekly, published Friday 15:30 ET for the Tuesday before. Managed-money net, net % of open interest and its rank over the previous 156 weeks, from the latest report public at `as_of`. Fetched every cycle, each release archived once under `cftc_cot/managed_money/<symbol>/`. Local `scripts/run_*` runs pass no COT client and skip it |
 
-**Weather scope:** US Drought Monitor + NOAA CPC are US-only. Coffee,
-cocoa, and sugar (Brazil/India/West Africa-heavy) get thinner weather input
-this cycle as a result. A global source is an explicit "revisit after the
-2-month review" item, not built now.
+**Weather scope:** each commodity's analyst is offered a fixed region list
+(`regions_for` in `tools/sources/weather.py`): US states for the grains
+(Drought Monitor + CPC); Brazil/Vietnam/Colombia for coffee, Brazil
+Center-South/India/Thailand for sugar, Ivory Coast/Ghana for cocoa, and the
+US cotton belt plus Brazil/India/China for cotton, the non-US ones through
+Open-Meteo point forecasts. Non-US regions have no drought index and no
+seasonal-outlook probabilities, only recent and forecast rainfall and
+temperature (min temperature for frost). Open-Meteo's free forecast API cannot
+be re-queried for a past `as_of`, so this input is live-only; counterfactual
+replay reuses the logged analyst outputs and never re-fetches it.
 
 **Correction to the design doc's source list:** "ISMA" (listed alongside
 USDA/UNICA/Conab/ISO in both `CLAUDE.md` and the v2 design doc) does not

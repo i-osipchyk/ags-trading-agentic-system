@@ -16,6 +16,8 @@ from ags.pipeline import run_pipeline
 from ags.portfolio.guardrails import GuardrailConfig
 from ags.portfolio.stage import COMMODITIES, PortfolioConfig, run_portfolio
 from ags.storage import LocalStorage, Prefixed
+from ags.tools.sources.cot import SocrataCotClient
+from ags.tools.sources.grinds import CocoaGrindsClient
 from ags.tools.sources.prices import CTraderPricesClient
 
 _ROOT = Path(__file__).resolve().parents[1]  # repo root
@@ -63,6 +65,7 @@ def main(argv: list[str] | None = None) -> None:
                 commodity=commodity, as_of=now, trigger_timestamp=now, chat_client=chat_client,
                 model=config.deepseek_model, log_dir=Prefixed(storage, "logs"), data_dir=Prefixed(storage, "data"),
                 audit_dir=Prefixed(storage, "audits"), prices_client=market,
+                cot_client=SocrataCotClient(), grinds_client=CocoaGrindsClient(),
             )
             calls[commodity] = result["call"]
             print(f"{commodity}: {result['call']['call']} ({result['call']['conviction']})")

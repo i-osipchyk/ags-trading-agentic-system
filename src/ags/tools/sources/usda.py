@@ -7,7 +7,7 @@ from typing import Protocol
 import requests
 from pypdf import PdfReader
 
-from ags.tools.pit_store import is_released, read_pit, release_instant, write_pit
+from ags.tools.pit_store import ET as EASTERN, is_released, read_pit, release_instant, write_pit
 
 SOURCE = "usda_esmis"
 _FIGURES = ("ending_stocks", "stocks_to_use")
@@ -30,13 +30,17 @@ _RELEASE_RE = re.compile(
 )
 
 
-# FAS "Coffee: World Markets and Trade" — semiannual PDF on ESMIS, world totals only.
-_COFFEE_LISTING = _ESMIS_BASE + "/publication/coffee-world-markets-and-trade"
-_COFFEE_RELEASE_RE = re.compile(
-    r'href="(/sites/default/release-files/[^"]*coffee\.pdf)"[^>]*>\s*<span[^>]*>\s*<time datetime="(\d{4}-\d{2}-\d{2})'
-)
+# FAS "Coffee: World Markets and Trade" — semiannual PDF, world totals only. ESMIS stopped carrying it after
+# Jun 2025; FAS serves every edition from apps.fas.usda.gov, where .../YYYY/MM/coffee.pdf is the latest edition
+# released in or before that month, so the release date comes from the PDF itself.
+_FAS_CIRCULARS = "https://apps.fas.usda.gov/psdonline/circulars"
+_COFFEE_LOOKBACK_MONTHS = 14  # editions are 6 months apart; the extra months cover a late or missed one
 _YEAR_RE = re.compile(r"\b\d{4}/\d{2}\b")
 _TOTAL_ROW_RE = re.compile(r"^\s*[\d,]*\s*Total\s+([\d,\s]+)$")
+# Section labels in the balance tables read "Domestic Consumption none" / "Ending Stocks none"; body text and
+# headlines ("World Ending Stocks Continue to Tighten") mention the same words and must not switch sections.
+_SECTION_RE = re.compile(r"^\s*(Domestic Consumption|Ending Stocks)\s+none\s*$")
+_SECTION_BY_LABEL = {"Domestic Consumption": "use", "Ending Stocks": "ending_stocks"}
 
 
 # The report each commodity's balance sheet comes from; WASDE unless listed.
@@ -92,6 +96,10 @@ def _parse_wasde(xml_bytes: bytes, symbol: str) -> dict | None:
     }
 
 
+def _pdf_release_date(pdf_bytes: bytes) -> date:
+    return PdfReader(io.BytesIO(pdf_bytes)).metadata.creation_date.date()
+
+
 def _parse_coffee(pdf_bytes: bytes) -> dict | None:
     lines = []
     for page in PdfReader(io.BytesIO(pdf_bytes)).pages:
@@ -101,10 +109,8 @@ def _parse_coffee(pdf_bytes: bytes) -> dict | None:
     section = None
     totals = {}
     for line in lines:
-        if "Domestic Consumption" in line:
-            section = "use"
-        elif "Ending Stocks" in line:
-            section = "ending_stocks"
+        if label := _SECTION_RE.match(line):
+            section = _SECTION_BY_LABEL[label.group(1)]
         elif section is None:
             years = _YEAR_RE.findall(line)
             if years:
@@ -134,20 +140,18 @@ class EsmisClient:
         return [(d, p) for p, d in seen.items()]
 
     def _coffee_release(self, as_of: datetime) -> dict | None:
-        response = requests.get(_COFFEE_LISTING, timeout=30)
-        response.raise_for_status()
-        eligible = [
-            (date.fromisoformat(day), path)
-            for path, day in _COFFEE_RELEASE_RE.findall(response.text)
-            if is_released(SOURCE, date.fromisoformat(day), as_of)
-        ]
-        if not eligible:
-            return None
-        release_date, path = max(eligible)
-        response = requests.get(_ESMIS_BASE + path, timeout=120)
-        response.raise_for_status()
-        parsed = _parse_coffee(response.content)
-        return None if parsed is None else {"release_date": release_date.isoformat(), **parsed}
+        local = as_of.astimezone(EASTERN)
+        year, month = local.year, local.month
+        for _ in range(_COFFEE_LOOKBACK_MONTHS):
+            response = requests.get(f"{_FAS_CIRCULARS}/{year}/{month:02d}/coffee.pdf", timeout=120)
+            response.raise_for_status()
+            release_date = _pdf_release_date(response.content)
+            if is_released(SOURCE, release_date, as_of):
+                parsed = _parse_coffee(response.content)
+                return None if parsed is None else {"release_date": release_date.isoformat(), **parsed}
+            # The folder already serves an edition newer than `as_of`; an earlier month serves the one before.
+            year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+        return None
 
     def get_report(self, report: str, symbol: str, *, as_of: datetime) -> dict | None:
         if report == "coffee_world_markets" and symbol == "coffee":
@@ -202,8 +206,9 @@ def get_usda_report(data_dir, *, report: str, symbol: str, as_of: datetime, clie
 
     just_before_latest = release_instant(SOURCE, date.fromisoformat(latest["release_date"])) - timedelta(microseconds=1)
     prior = _get_release(data_dir, report=report, symbol=symbol, as_of=just_before_latest, client=client)
-    result["prior"] = prior
-    if prior is not None:
+    # A release for another marketing year is a different balance sheet, not an earlier view of this one.
+    if prior is not None and prior["marketing_year"] == latest["marketing_year"]:
+        result["prior"] = prior
         change = {k: round(latest[k] - prior[k], 4) for k in _FIGURES}
         result["change"] = change
         result["revision_direction"] = _direction(change["ending_stocks"])
