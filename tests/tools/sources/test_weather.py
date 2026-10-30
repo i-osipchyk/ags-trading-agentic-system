@@ -1,6 +1,9 @@
 import json
 from datetime import date, datetime
 
+import pytest
+
+from ags.tools.sources import weather
 from ags.tools.sources.weather import get_weather
 from ags.tools.pit_store import ET
 
@@ -95,3 +98,79 @@ def test_get_weather_drops_an_outlook_record_dated_after_as_of(tmp_path):
     result = get_weather(tmp_path, region="IA", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=client)
 
     assert result["outlook"] is None
+
+
+class _OpenMeteoResponse:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _open_meteo_payload() -> dict:
+    # 14 days before 2026-10-30 followed by 7 days from it (forecast_days includes today).
+    past_precip = [0, 0, 0, 10, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0]
+    past_tmin = [12.0] * 14
+    past_tmin[5] = 9.5
+    past_tmax = [30.0] * 14
+    past_tmax[2] = 33.0
+    return {
+        "daily": {
+            "time": [f"2026-10-{day}" for day in range(16, 32)] + [f"2026-11-0{day}" for day in range(1, 6)],
+            "precipitation_sum": past_precip + [0, 20, 0, 0, 0, 0, 3],
+            "temperature_2m_min": past_tmin + [11.0, 10.0, 8.0, 12.0, 12.0, 12.0, 12.0],
+            "temperature_2m_max": past_tmax + [28.0, 29.0, 31.5, 27.0, 27.0, 27.0, 27.0],
+        }
+    }
+
+
+def test_get_weather_summarises_open_meteo_history_and_forecast_for_a_non_us_region(tmp_path, monkeypatch):
+    requests_made = []
+
+    def fake_get(url, **kwargs):
+        requests_made.append((url, kwargs.get("params", {})))
+        return _OpenMeteoResponse(_open_meteo_payload())
+
+    monkeypatch.setattr(weather.requests, "get", fake_get)
+
+    result = get_weather(tmp_path, region="BR-MG", as_of=datetime(2026, 10, 30, 10, 0, tzinfo=ET))
+
+    assert result["forecast"] == {
+        "issued": "2026-10-30",
+        "past_14d": {"precip_mm": 15.0, "tmin_c": 9.5, "tmax_c": 33.0},
+        "next_7d": {"precip_mm": 23.0, "tmin_c": 8.0, "tmax_c": 31.5},
+    }
+    assert len(requests_made) == 1
+    assert requests_made[0][1]["latitude"] == -21.2  # Minas Gerais, Brazil's main arabica state
+
+
+def test_get_weather_refetches_open_meteo_every_cycle_and_archives_each_pull(tmp_path, monkeypatch):
+    requests_made = []
+
+    def fake_get(url, **kwargs):
+        requests_made.append(url)
+        return _OpenMeteoResponse(_open_meteo_payload())
+
+    monkeypatch.setattr(weather.requests, "get", fake_get)
+
+    morning = get_weather(tmp_path, region="BR-MG", as_of=datetime(2026, 10, 30, 6, 0, tzinfo=ET))
+    midday = get_weather(tmp_path, region="BR-MG", as_of=datetime(2026, 10, 30, 12, 30, tzinfo=ET))
+
+    assert len(requests_made) == 2  # a forecast cached at 06:00 would be stale at 12:30
+    archived = sorted((tmp_path / "open_meteo" / "forecast" / "BR-MG").glob("*.json"))
+    assert [json.loads(path.read_text()) for path in archived] == [morning["forecast"], midday["forecast"]]
+
+
+@pytest.mark.parametrize("commodity", ["coffee", "cocoa", "sugar", "cotton"])
+def test_every_region_a_commodity_is_offered_can_be_fetched(tmp_path, monkeypatch, commodity):
+    monkeypatch.setattr(weather.requests, "get", lambda url, **kwargs: _OpenMeteoResponse(_open_meteo_payload()))
+    us_client = FakeWeatherClient(drought_by_region={}, outlook_by_region={})
+
+    for region in weather.regions_for(commodity):
+        client = us_client if region in weather.SUPPORTED_REGIONS else None
+        result = get_weather(tmp_path, region=region, as_of=datetime(2026, 10, 30, 10, 0, tzinfo=ET), client=client)
+        assert result["region"] == region

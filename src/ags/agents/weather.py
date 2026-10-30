@@ -3,14 +3,14 @@ from datetime import datetime
 from ags.agents.output import list_of, of, parse_reply
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.growing_calendar import get_growing_calendar as compute_growing_calendar
-from ags.tools.sources.weather import SUPPORTED_REGIONS, WeatherClient
+from ags.tools.sources.weather import WeatherClient, regions_for
 from ags.tools.sources.weather import get_weather as fetch_weather
 
 SYSTEM_PROMPT_TEMPLATE = """You are the Weather/season analyst for {commodity} futures.
 
 Regional conditions matter relative to crop growth stage — a dry spell
 before planting is noise, the same dry spell during flowering is a real
-threat. Use the get_weather tool to check conditions for the US growing
+threat. Use the get_weather tool to check conditions for the growing
 regions you judge most relevant to {commodity} (supported regions:
 {supported_regions}).
 
@@ -44,18 +44,20 @@ def run_weather_analyst(
     # model to retry. A region with no data at all is a gap the model can't fix.
     def _get_weather_tool(region: str) -> dict:
         nonlocal degraded
+        if region not in regions_for(commodity):
+            raise ValueError(f"region {region!r} is not one of {commodity}'s regions: {', '.join(regions_for(commodity))}")
         result = fetch_weather(data_dir, region=region, as_of=as_of, client=weather_client)
-        if result["drought"] is None and result["outlook"] is None:
+        if all(result.get(part) is None for part in ("drought", "outlook", "forecast")):
             degraded = True
         return result
 
     tools = [
         ToolSpec(
             name="get_weather",
-            description="Drought monitor conditions and CPC temp/precip outlook for a US region.",
+            description="Drought monitor and CPC outlook for a US state, or recent and forecast precipitation and temperature for a non-US growing region.",
             parameters={
                 "type": "object",
-                "properties": {"region": {"type": "string", "description": "Two-letter US state code, e.g. 'IA'"}},
+                "properties": {"region": {"type": "string", "description": "A supported region code, e.g. 'IA' or 'BR-MG'"}},
                 "required": ["region"],
             },
             function=_get_weather_tool,
@@ -66,7 +68,7 @@ def run_weather_analyst(
         commodity=commodity,
         as_of=as_of.isoformat(),
         stage_of_crop_cycle=stage_of_crop_cycle,
-        supported_regions=", ".join(SUPPORTED_REGIONS),
+        supported_regions=", ".join(regions_for(commodity)),
     )
     user_prompt = f"Assess weather/season conditions for {commodity} as of {as_of.isoformat()}."
 

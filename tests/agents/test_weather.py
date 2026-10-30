@@ -1,6 +1,8 @@
 import json
 from datetime import date, datetime
 
+import pytest
+
 from ags.agents.weather import run_weather_analyst
 from ags.tools.pit_store import ET
 
@@ -167,3 +169,72 @@ def test_run_weather_analyst_surfaces_degraded_true_when_the_model_returns_unpar
         "unparsed_reply": "not valid json",  # handed to the coordinator as is
         "degraded": True,
     }
+
+
+def _final_reply() -> dict:
+    return {
+        "role": "assistant",
+        "content": json.dumps({"regions_covered": [], "current_conditions": {}, "risk_assessment": {}}),
+        "tool_calls": None,
+    }
+
+
+def test_run_weather_analyst_offers_coffee_only_its_growing_regions(tmp_path):
+    chat_client = FakeChatClient(responses=[_final_reply()])
+
+    run_weather_analyst(
+        tmp_path,
+        chat_client,
+        commodity="coffee",
+        as_of=datetime(2026, 10, 30, 10, 0, tzinfo=ET),
+        model="deepseek-chat",
+        weather_client=FakeWeatherClient(),
+    )
+
+    system_prompt = chat_client.calls[0]["messages"][0]["content"]
+    # Brazil (Minas Gerais, Sao Paulo, Espirito Santo), Vietnam (Dak Lak), Colombia (Huila): no US states.
+    assert "BR-ES, BR-MG, BR-SP, CO-HU, VN-DL" in system_prompt
+    assert "IA" not in system_prompt.split("supported regions:")[1].split(")")[0]
+
+
+def test_run_weather_analyst_rejects_a_region_outside_the_commodity_s_list_without_fetching(tmp_path):
+    weather_client = FakeWeatherClient(by_region={"IA": IOWA})
+    chat_client = FakeChatClient(responses=[_tool_call_message("get_weather", {"region": "IA"}), _final_reply()])
+
+    result = run_weather_analyst(
+        tmp_path,
+        chat_client,
+        commodity="coffee",
+        as_of=datetime(2026, 10, 30, 10, 0, tzinfo=ET),
+        model="deepseek-chat",
+        weather_client=weather_client,
+    )
+
+    assert weather_client.drought_calls == []
+    assert result["degraded"] is True  # the model's tool call failed
+
+
+@pytest.mark.parametrize(
+    ("commodity", "expected"),
+    [
+        # Brazil Center-South cane, India (Maharashtra, Karnataka), Thailand.
+        ("sugar", "BR-CS, IN-KA, IN-MH, TH"),
+        # Ivory Coast and Ghana.
+        ("cocoa", "CI, GH"),
+        # The US cotton belt plus Brazil (Mato Grosso), China (Xinjiang) and India (Gujarat).
+        ("cotton", "AL, AR, BR-MT, CN-XJ, GA, IN-GJ, LA, MO, MS, NC, SC, TN, TX"),
+    ],
+)
+def test_run_weather_analyst_offers_each_commodity_its_own_growing_regions(tmp_path, commodity, expected):
+    chat_client = FakeChatClient(responses=[_final_reply()])
+
+    run_weather_analyst(
+        tmp_path,
+        chat_client,
+        commodity=commodity,
+        as_of=datetime(2026, 10, 30, 10, 0, tzinfo=ET),
+        model="deepseek-chat",
+        weather_client=FakeWeatherClient(),
+    )
+
+    assert f"supported regions:\n{expected})" in chat_client.calls[0]["messages"][0]["content"]
