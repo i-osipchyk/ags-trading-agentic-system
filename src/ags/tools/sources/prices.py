@@ -282,7 +282,9 @@ class CTraderPricesClient:
         unsubscribe.symbolId.append(symbol_id)
         try:
             event = self._request(subscribe)
-            while not (event.bid and event.ask):
+            # The unsubscribe above is fire-and-forget, so a late tick of the previous symbol can
+            # arrive first; only a tick for this symbol, carrying both sides, is the quote.
+            while event.symbolId != symbol_id or not (event.bid and event.ask):
                 event = self._wait_next()
         finally:
             self._client.send(unsubscribe)
