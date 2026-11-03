@@ -311,3 +311,23 @@ def test_a_longer_lookback_than_an_earlier_call_backfills_instead_of_silently_re
 
     assert len(short) == 4 and len(longer) == 12  # 15:00..17:45
     assert client.calls[1][1:] == (datetime(2026, 1, 6, 15, tzinfo=timezone.utc), datetime(2026, 1, 6, 17, tzinfo=timezone.utc))
+
+
+def test_client_quote_skips_a_stale_tick_of_another_symbol():
+    from ags.tools.sources.prices import CTraderPricesClient
+
+    def tick(symbol_id, bid):
+        return ProtoOASpotEvent(symbolId=symbol_id, bid=bid, ask=bid + 10, timestamp=1_700_000_000_000)
+
+    client = CTraderPricesClient.__new__(CTraderPricesClient)
+    client._symbol_ids = {"XSUGAR": 119}
+    client._config = type("C", (), {"ctrader_account_id": 1})()
+    client._client = type("K", (), {"send": lambda self, request: None})()
+    events = iter([tick(149, 60870000), tick(119, 1767500000)])
+    client._request = lambda request: next(events)
+    client._wait_next = lambda: next(events)
+
+    quote = client.get_quote("XSUGAR")
+
+    assert quote["symbol_id"] == 119
+    assert quote["bid"] == 17675.0
