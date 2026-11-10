@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 from ags.tools.sources.usda import get_balance_sheet_revisions, get_usda_report
 from ags.tools.pit_store import ET, is_released
@@ -164,3 +164,63 @@ def test_a_prior_release_for_another_marketing_year_is_not_a_revision(tmp_path):
     assert report["prior"] is None
     assert "change" not in report
     assert revisions == {"symbol": "coffee", "ending_stocks_change": None, "stocks_to_use_change": None, "stocks_to_use_trend": None}
+
+
+CORN_OCT = {"release_date": "2026-10-09", "marketing_year": "2026/27", "ending_stocks": 1849.0, "stocks_to_use": 11.34}
+CORN_NOV = {"release_date": "2026-11-10", "marketing_year": "2026/27", "ending_stocks": 1758.0, "stocks_to_use": 10.82}
+_AFTER_NOV_RELEASE = datetime(2026, 11, 10, 12, 30, tzinfo=ET)
+
+
+def _cache_october(tmp_path):
+    get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=datetime(2026, 10, 20, 12, 30, tzinfo=ET), client=FakeUsdaClient({"corn": [CORN_OCT]}), now=datetime(2026, 11, 1, tzinfo=timezone.utc))
+
+
+def test_a_live_cycle_after_a_new_release_refreshes_a_stale_cached_release(tmp_path):
+    _cache_october(tmp_path)
+    client = FakeUsdaClient({"corn": [CORN_OCT, CORN_NOV]})
+
+    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=_AFTER_NOV_RELEASE, client=client, now=_AFTER_NOV_RELEASE + timedelta(minutes=6))
+
+    assert result["latest"] == CORN_NOV
+    assert result["prior"] == CORN_OCT
+    assert result["change"]["ending_stocks"] == -91.0
+    assert len(client.calls) == 1  # the prior release comes from the cache
+    assert {f.stem for f in (tmp_path / "usda_esmis" / "wasde" / "corn").glob("*.json")} == {"2026-10-09", "2026-11-10"}
+
+
+def test_a_live_cycle_before_the_new_release_keeps_the_cached_one(tmp_path):
+    _cache_october(tmp_path)
+    before = datetime(2026, 11, 10, 6, 0, tzinfo=ET)
+    client = FakeUsdaClient({"corn": [CORN_OCT, CORN_NOV]})
+
+    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=before, client=client, now=before + timedelta(minutes=6))
+
+    assert result["latest"] == CORN_OCT
+
+
+def test_a_live_cycle_keeps_the_cache_when_the_source_has_nothing_newer_yet(tmp_path):
+    _cache_october(tmp_path)
+
+    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=_AFTER_NOV_RELEASE, client=FakeUsdaClient({"corn": [CORN_OCT]}), now=_AFTER_NOV_RELEASE)
+
+    assert result["latest"] == CORN_OCT
+
+
+def test_a_replayed_as_of_reads_the_cache_and_never_asks_the_source(tmp_path):
+    _cache_october(tmp_path)
+    client = FakeUsdaClient({"corn": [CORN_OCT, CORN_NOV]})
+
+    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=_AFTER_NOV_RELEASE, client=client, now=_AFTER_NOV_RELEASE + timedelta(days=3))
+
+    assert result["latest"] == CORN_OCT
+    assert [c for c in client.calls if c[2] == _AFTER_NOV_RELEASE] == []
+
+
+def test_a_recent_cached_release_is_not_refreshed(tmp_path):
+    _cache_october(tmp_path)
+    client = FakeUsdaClient({"corn": [CORN_OCT]})
+    as_of = datetime(2026, 10, 25, 12, 30, tzinfo=ET)  # 16 days after the release
+
+    get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=as_of, client=client, now=as_of)
+
+    assert [c for c in client.calls if c[2] == as_of] == []

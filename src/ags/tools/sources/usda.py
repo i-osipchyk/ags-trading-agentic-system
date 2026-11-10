@@ -1,16 +1,20 @@
 import io
 import re
 import xml.etree.ElementTree as ET
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Protocol
 
 import requests
 from pypdf import PdfReader
 
 from ags.tools.pit_store import ET as EASTERN, is_released, read_pit, release_instant, write_pit
+from ags.tools.sources.prices import LIVE_CYCLE_MAX_AGE
 
 SOURCE = "usda_esmis"
 _FIGURES = ("ending_stocks", "stocks_to_use")
+# WASDE comes out about monthly, never closer than four weeks, so a cached release younger than this can't
+# have been superseded; an older one may have been, and a live cycle asks the source again.
+_REFRESH_AFTER = timedelta(days=20)
 
 
 _ESMIS_BASE = "https://esmis.nal.usda.gov"
@@ -180,26 +184,42 @@ def _direction(delta: float) -> str:
     return "up" if delta > 0 else "down" if delta < 0 else "unchanged"
 
 
-def _get_release(data_dir, *, report: str, symbol: str, as_of: datetime, client: UsdaClient) -> dict | None:
+def _may_be_superseded(cached: dict, as_of: datetime, now: datetime) -> bool:
+    """Whether a live cycle should ask the source for a release newer than the cached one.
+
+    A replayed or backtested `as_of` reads only what was stored; a live one past the cached release's
+    refresh age may have a new release out (the cache returns the newest stored one, so it never sees it).
+    """
+    if now - as_of > LIVE_CYCLE_MAX_AGE:
+        return False
+    return as_of - release_instant(SOURCE, date.fromisoformat(cached["release_date"])) >= _REFRESH_AFTER
+
+
+def _get_release(
+    data_dir, *, report: str, symbol: str, as_of: datetime, client: UsdaClient, now: datetime | None = None,
+    refresh: bool = False,
+) -> dict | None:
     cached = read_pit(data_dir, source=SOURCE, report=report, symbol=symbol, as_of=as_of)
-    if cached is not None:
+    if cached is not None and not (refresh and _may_be_superseded(cached, as_of, now or datetime.now(timezone.utc))):
         return cached
 
     record = client.get_report(report, symbol, as_of=as_of)
     if record is None:
-        return None
+        return cached
     # Defensive PIT filter: the client's own date-scoping is a request, not
     # a guarantee, per CLAUDE.md's PIT hard constraint.
     release_date = date.fromisoformat(record["release_date"])
     if not is_released(SOURCE, release_date, as_of):
-        return None
+        return cached
 
     write_pit(data_dir, source=SOURCE, report=report, symbol=symbol, release_date=release_date, content=record)
     return record
 
 
-def get_usda_report(data_dir, *, report: str, symbol: str, as_of: datetime, client: UsdaClient) -> dict:
-    latest = _get_release(data_dir, report=report, symbol=symbol, as_of=as_of, client=client)
+def get_usda_report(
+    data_dir, *, report: str, symbol: str, as_of: datetime, client: UsdaClient, now: datetime | None = None
+) -> dict:
+    latest = _get_release(data_dir, report=report, symbol=symbol, as_of=as_of, client=client, now=now, refresh=True)
     result = {"report": report, "symbol": symbol, "latest": latest, "prior": None}
     if latest is None:
         return result
@@ -215,9 +235,11 @@ def get_usda_report(data_dir, *, report: str, symbol: str, as_of: datetime, clie
     return result
 
 
-def get_balance_sheet_revisions(data_dir, *, symbol: str, as_of: datetime, client: UsdaClient) -> dict:
+def get_balance_sheet_revisions(
+    data_dir, *, symbol: str, as_of: datetime, client: UsdaClient, now: datetime | None = None
+) -> dict:
     result = get_usda_report(
-        data_dir, report=report_for_symbol(symbol), symbol=symbol, as_of=as_of, client=client
+        data_dir, report=report_for_symbol(symbol), symbol=symbol, as_of=as_of, client=client, now=now
     )
     change = result.get("change")
     if change is None:
