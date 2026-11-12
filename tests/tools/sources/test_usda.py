@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timedelta, timezone
 
 from ags.tools.sources.usda import get_balance_sheet_revisions, get_usda_report
@@ -171,8 +172,8 @@ CORN_NOV = {"release_date": "2026-11-10", "marketing_year": "2026/27", "ending_s
 _AFTER_NOV_RELEASE = datetime(2026, 11, 10, 12, 30, tzinfo=ET)
 
 
-def _cache_october(tmp_path):
-    get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=datetime(2026, 10, 20, 12, 30, tzinfo=ET), client=FakeUsdaClient({"corn": [CORN_OCT]}), now=datetime(2026, 11, 1, tzinfo=timezone.utc))
+def _cache_october(tmp_path, record=CORN_OCT):
+    get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=datetime(2026, 10, 20, 12, 30, tzinfo=ET), client=FakeUsdaClient({"corn": [record]}), now=datetime(2026, 11, 1, tzinfo=timezone.utc))
 
 
 def test_a_live_cycle_after_a_new_release_refreshes_a_stale_cached_release(tmp_path):
@@ -217,10 +218,70 @@ def test_a_replayed_as_of_reads_the_cache_and_never_asks_the_source(tmp_path):
 
 
 def test_a_recent_cached_release_is_not_refreshed(tmp_path):
-    _cache_october(tmp_path)
-    client = FakeUsdaClient({"corn": [CORN_OCT]})
+    full = {**CORN_OCT, "figures": {}}
+    _cache_october(tmp_path, full)
+    client = FakeUsdaClient({"corn": [full]})
     as_of = datetime(2026, 10, 25, 12, 30, tzinfo=ET)  # 16 days after the release
 
     get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=as_of, client=client, now=as_of)
 
     assert [c for c in client.calls if c[2] == as_of] == []
+
+
+NOV_FIGURES = {
+    "yield": {"value": 179.6, "prior": 181.2},
+    "ending_stocks": {"value": 1758.0, "prior": 1849.0},
+    "total_use": {"value": 16255.0, "prior": 16305.0},
+    "avg_farm_price": {"value": 4.6, "prior": None},
+}
+CORN_NOV_FULL = {**CORN_NOV, "figures": NOV_FIGURES, "prior_stocks_to_use": 11.34, "units": "million bushels"}
+
+
+def test_the_report_gives_each_figures_change_from_the_prior_month_the_release_states(tmp_path):
+    client = FakeUsdaClient({"corn": [CORN_NOV_FULL]})
+
+    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=_AFTER_NOV_RELEASE, client=client, now=_AFTER_NOV_RELEASE)
+
+    assert result["figure_changes"]["yield"] == {"value": 179.6, "prior": 181.2, "change": -1.6, "direction": "down"}
+    assert result["figure_changes"]["ending_stocks"]["change"] == -91.0
+    assert "avg_farm_price" not in result["figure_changes"]  # no earlier month to compare with
+
+
+def test_the_revision_comes_from_the_release_itself_when_no_earlier_release_is_stored(tmp_path):
+    client = FakeUsdaClient({"corn": [CORN_NOV_FULL]})  # nothing before it to serve as the prior release
+
+    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=_AFTER_NOV_RELEASE, client=client, now=_AFTER_NOV_RELEASE)
+
+    assert result["prior"] is None
+    assert result["change"] == {"ending_stocks": -91.0, "stocks_to_use": round(CORN_NOV["stocks_to_use"] - 11.34, 4)}
+    assert result["revision_direction"] == "down"
+
+
+def _cache_nov_without_figures(tmp_path):
+    """The Nov release as an older version of the parser stored it (a replayed read, so it only reads the source)."""
+    get_usda_report(
+        tmp_path, report="wasde", symbol="corn", as_of=_AFTER_NOV_RELEASE, client=FakeUsdaClient({"corn": [CORN_NOV]}),
+        now=_AFTER_NOV_RELEASE + timedelta(days=3),
+    )
+    assert "figures" not in json.loads((tmp_path / "usda_esmis" / "wasde" / "corn" / "2026-11-10.json").read_text())
+
+
+def test_a_live_cycle_stores_a_record_cached_without_figures_again_with_them(tmp_path):
+    _cache_nov_without_figures(tmp_path)
+    client = FakeUsdaClient({"corn": [CORN_NOV_FULL]})
+
+    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=_AFTER_NOV_RELEASE, client=client, now=_AFTER_NOV_RELEASE)
+
+    assert result["latest"]["figures"] == NOV_FIGURES
+    stored = json.loads((tmp_path / "usda_esmis" / "wasde" / "corn" / "2026-11-10.json").read_text())
+    assert stored["figures"] == NOV_FIGURES
+
+
+def test_a_replay_leaves_a_record_cached_without_figures_alone(tmp_path):
+    _cache_nov_without_figures(tmp_path)
+    client = FakeUsdaClient({"corn": [CORN_NOV_FULL]})
+
+    result = get_usda_report(tmp_path, report="wasde", symbol="corn", as_of=_AFTER_NOV_RELEASE, client=client, now=_AFTER_NOV_RELEASE + timedelta(days=3))
+
+    assert "figures" not in result["latest"]
+    assert [c for c in client.calls if c[2] == _AFTER_NOV_RELEASE] == []

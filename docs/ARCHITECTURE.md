@@ -152,6 +152,24 @@ call (its tool allowlist) — never the tool implementation itself, so the
   report, then returns it. No separate scheduled ingestion job — the store
   grows as a point-in-time archive "for free," useful if historical
   backtesting is added later.
+- **A live cycle refreshes a stale cache.** The store returns the newest
+  release stored by `as_of`, so on its own it never notices a newer one.
+  For the periodic sources (WASDE, the Drought Monitor map, the CPC
+  outlook), a **live** cycle (`as_of` within an hour of now, `LIVE_CYCLE_MAX_AGE`)
+  asks the source again once the cached release is older than the source's
+  shortest release gap (`pit_store.refresh_due`: 20 days WASDE, 7 days
+  drought, 14 days outlook). A replayed or backtested `as_of` only reads
+  what was stored. A WASDE record stored before the parser kept the full
+  supply/use rows is stored again, with them, by the first live read.
+- **WASDE figures:** the record keeps the supply/use rows (area, yield,
+  beginning stocks, production, imports, exports, total use, ending stocks,
+  price, and the main demand row), each with the previous month's forecast of
+  the same marketing year as `prior`, so a revision never needs a second
+  fetch. The supply/demand analyst reports the figures that moved.
+- **News headlines are tied to search results in code** (`ground_headlines`):
+  the date, source and URL of each headline come from the search result, not
+  the model; a headline matching no result is dropped (`dropped_untraceable`)
+  and a story syndicated across sites is kept once.
 - **Testing:** a dedicated fixture-based unit test suite isolated to
   `read_pit` and the fetch-through-cache path — deliberately future-dated
   releases mixed into fixtures, asserting they never come back; inclusive

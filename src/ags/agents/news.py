@@ -1,4 +1,6 @@
+import difflib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,9 +21,9 @@ headline alone isn't enough to judge its direction.
 
 Respond with a JSON object containing exactly this field:
   "headlines": a deduped list of objects, each with:
-    "headline": the article title
+    "headline": the article title, copied exactly as search_news returned it
     "source": where it's from
-    "date": the article's publish date (ISO format)
+    "date": the article's publish date (ISO format), copied from the search result
     "direction": "bullish" | "bearish" | "neutral"
     "reason": one-line reason for that direction call
 No other text — JSON only."""
@@ -32,6 +34,40 @@ No other text — JSON only."""
 NEWS_FETCH_BEFORE_HOUR_ET = 9
 # Older than this (a long weekend, say) the slot is left empty and degraded.
 MAX_CARRY_AGE = timedelta(days=4)
+
+
+def _title_key(text: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").casefold()).strip()
+
+
+def ground_headlines(headlines: list[dict], seen: list[dict]) -> tuple[list[dict], int]:
+    """Tie the model's headlines to the search results it was shown.
+
+    The date, source and URL come from the search result, never from the model (it has restated a date
+    before, and a date decides what the point-in-time filter let through). A headline matching no result
+    is dropped: it can't be traced to an article. Repeats (the same story syndicated across sites) are
+    kept once. Returns the grounded headlines and how many were dropped as untraceable.
+    """
+    by_title = {_title_key(r["headline"]): r for r in seen if r.get("headline")}
+    out, used_urls, used_titles, dropped = [], set(), set(), 0
+    for item in headlines:
+        title = _title_key(item.get("headline"))
+        hit = by_title.get(title)
+        if hit is None and title:
+            close = difflib.get_close_matches(title, list(by_title), n=1, cutoff=0.9)
+            hit = by_title[close[0]] if close else None
+        if hit is None:
+            dropped += 1
+            continue
+        key = _title_key(hit["headline"])
+        if hit.get("url") in used_urls or key in used_titles:
+            continue
+        used_urls.add(hit.get("url"))
+        used_titles.add(key)
+        out.append(
+            {**item, "headline": hit["headline"], "source": hit["source"], "date": hit["date"], "url": hit.get("url")}
+        )
+    return out, dropped
 
 
 def fetches_news(as_of: datetime) -> bool:
@@ -84,9 +120,12 @@ def run_news_analyst(
     model: str,
     news_client: NewsClient | None = None,
 ) -> dict:
+    seen: list[dict] = []  # every search result the model was shown, to tie its headlines back to
+
     # Both raise on a source failure: the loop reports it and asks the model to retry.
     def _search_news_tool(query: str) -> dict:
         results = fetch_search_news(data_dir, commodity=commodity, query=query, as_of=as_of, client=news_client)
+        seen.extend(results)
         return {"results": results}
 
     def _fetch_document_tool(url: str) -> dict:
@@ -127,9 +166,11 @@ def run_news_analyst(
     # markup as plain content instead of the requested JSON. A malformed
     # final answer degrades the run rather than crashing the pipeline.
     parsed, complete, unparsed = parse_reply(loop_result.content, {"headlines": list_of(dict)})
+    headlines, dropped = ground_headlines(parsed.get("headlines", []), seen)
 
     return {
-        "headlines": parsed.get("headlines", []),
+        "headlines": headlines,
+        **({"dropped_untraceable": dropped} if dropped else {}),
         **unparsed,
         "degraded": not complete or loop_result.tool_errors > 0,
     }

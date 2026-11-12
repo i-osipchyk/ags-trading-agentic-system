@@ -17,10 +17,16 @@ release, and get_balance_sheet_revisions for the month-over-month change in
 ending stocks and stocks-to-use. The as-of date ({as_of}) is fixed; you
 cannot see anything released after it.
 
+A WASDE result carries the release's supply/use rows in "figures" (yield, production, imports,
+exports, total use, ending stocks, price, and the main demand row where the table has one), each with
+the previous month's forecast of the same marketing year as "prior", and "figure_changes" with the
+revision of each. Units are in "units". The market trades on revisions, so report the figures that
+moved, largest first, rather than only ending stocks; an unrevised figure is context, not news.
+
 Respond with a JSON object containing exactly these fields:
   "latest_report": {{"name": report name, "date": release date (YYYY-MM-DD)}}
   "key_figures": list of {{"figure", "value", "prior", "revision_direction"}}
-    where revision_direction is "up" | "down" | "unchanged"
+    where prior is last month's forecast and revision_direction is "up" | "down" | "unchanged"
   "stocks_to_use": {{"value": current stocks-to-use, "trend": "tightening" | "loosening"}}
 No other text — JSON only."""
 

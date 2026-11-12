@@ -7,8 +7,15 @@ from typing import Protocol
 import requests
 from pypdf import PdfReader
 
-from ags.tools.pit_store import ET as EASTERN, is_released, read_pit, release_instant, write_pit
-from ags.tools.sources.prices import LIVE_CYCLE_MAX_AGE
+from ags.tools.pit_store import (
+    ET as EASTERN,
+    LIVE_CYCLE_MAX_AGE,
+    is_released,
+    read_pit,
+    refresh_due,
+    release_instant,
+    write_pit,
+)
 
 SOURCE = "usda_esmis"
 _FIGURES = ("ending_stocks", "stocks_to_use")
@@ -26,8 +33,32 @@ _MAX_LISTING_PAGES = 10
 # million bales for cotton, 1,000 short tons for sugar); only stocks-to-use is comparable across them.
 _WASDE_TABLES = {"wheat": ("sr11", 0), "corn": ("sr12", 1), "soybeans": ("sr15", 0), "cotton": ("sr17", 0), "sugar": ("sr16", 0)}
 
-# The sugar table labels its total-use row differently from the grain/cotton tables.
-_TOTAL_USE_ALIASES = {"total use": "use, total"}
+# The supply/use rows the analyst is given, by the name each commodity's table uses (footnote marks such as
+# " 2/" are stripped first). The sugar table labels some rows differently from the grain and cotton ones.
+_FIGURE_ROWS = {
+    "area_harvested": lambda n: n in ("area harvested", "harvested"),
+    "yield": lambda n: n == "yield per harvested acre",
+    "beginning_stocks": lambda n: n == "beginning stocks",
+    "production": lambda n: n == "production",
+    "imports": lambda n: n == "imports",
+    "exports": lambda n: n in ("exports", "exports, total"),
+    "total_use": lambda n: n in ("use, total", "total use"),
+    "ending_stocks": lambda n: n == "ending stocks",
+    "avg_farm_price": lambda n: n.startswith("avg. farm price"),
+    # The commodity's main demand driver, where the table has one.
+    "ethanol_use": lambda n: n.startswith("ethanol"),
+    "crush": lambda n: n == "crushings",
+}
+_FOOTNOTE_RE = re.compile(r"\s*\d+/")
+_NUMBER_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+# What each figure is measured in (the tables differ), so the analyst doesn't compare across commodities.
+_UNITS = {
+    "wheat": "million bushels; yield bu/acre; area million acres; price $/bu",
+    "corn": "million bushels; yield bu/acre; area million acres; price $/bu",
+    "soybeans": "million bushels; yield bu/acre; area million acres; price $/bu",
+    "cotton": "million 480-lb bales; yield lb/acre; area million acres; price cents/lb",
+    "sugar": "1,000 short tons",
+}
 
 _RELEASE_RE = re.compile(
     r'href="(/sites/default/release-files/\d+/wasde[^"]*\.xml)"[^>]*>\s*<span[^>]*>\s*(?:[^<]*?)<time datetime="(\d{4}-\d{2}-\d{2})'
@@ -59,6 +90,12 @@ class UsdaClient(Protocol):
     def get_report(self, report: str, symbol: str, *, as_of: datetime) -> dict | None: ...
 
 
+def _number(raw: str) -> float | None:
+    """A cell's number, ignoring footnote marks ("10.45 **"); None when it has none."""
+    match = _NUMBER_RE.match(raw.strip())
+    return float(match.group().replace(",", "")) if match else None
+
+
 def _row_cells(row: ET.Element) -> list[tuple[str, float]]:
     cells = []
     for year_group in row.iter():
@@ -67,8 +104,9 @@ def _row_cells(row: ET.Element) -> list[tuple[str, float]]:
         year = next(v for k, v in year_group.attrib.items() if k.startswith("market_year"))
         for cell in year_group.iter("Cell"):
             value = next((v for k, v in cell.attrib.items() if k.startswith("cell_value")), None)
-            if value:
-                cells.append((year, float(value.replace(",", ""))))
+            number = _number(value) if value else None
+            if number is not None:
+                cells.append((year, number))
     return cells
 
 
@@ -78,26 +116,39 @@ def _parse_wasde(xml_bytes: bytes, symbol: str) -> dict | None:
     report = root.find(sub_report).find("Report")
     matrices = [m for m in report if m.tag.startswith("matrix")]
 
-    figures = {}
+    rows: dict[str, list[tuple[str, float]]] = {}
     for element in matrices[matrix_idx].iter():
         attr = next((v for k, v in element.attrib.items() if re.fullmatch(r"attribute\d+", k)), None)
         if attr is None:
             continue
-        name = " ".join(attr.split()).lower()
-        name = _TOTAL_USE_ALIASES.get(name, name)
-        if name in ("ending stocks", "use, total") and _row_cells(element):
-            # The last cell is the newest marketing year's most recent forecast month.
-            figures[name] = _row_cells(element)[-1]
+        name = _FOOTNOTE_RE.sub("", " ".join(attr.split())).lower()
+        key = next((k for k, matches in _FIGURE_ROWS.items() if matches(name)), None)
+        if key is None or key in rows:
+            continue
+        if cells := _row_cells(element):
+            rows[key] = cells
 
-    if "ending stocks" not in figures or "use, total" not in figures:
+    if "ending_stocks" not in rows or "total_use" not in rows:
         return None
-    year, ending = figures["ending stocks"]
-    _, use = figures["use, total"]
-    return {
+    # The last cell is the newest marketing year's most recent forecast month; the one before it is the previous
+    # month's forecast of the same year (absent in the year's first projection, when it belongs to the year before).
+    figures = {}
+    for key, cells in rows.items():
+        year, value = cells[-1]
+        prior = cells[-2][1] if len(cells) > 1 and cells[-2][0] == year else None
+        figures[key] = {"value": value, "prior": prior}
+    year = rows["ending_stocks"][-1][0]
+    ending, use = figures["ending_stocks"], figures["total_use"]
+    record = {
         "marketing_year": year,
-        "ending_stocks": ending,
-        "stocks_to_use": round(ending / use * 100, 2),
+        "ending_stocks": ending["value"],
+        "stocks_to_use": round(ending["value"] / use["value"] * 100, 2),
+        "figures": figures,
+        "units": _UNITS[symbol],
     }
+    if ending["prior"] is not None and use["prior"]:
+        record["prior_stocks_to_use"] = round(ending["prior"] / use["prior"] * 100, 2)
+    return record
 
 
 def _pdf_release_date(pdf_bytes: bytes) -> date:
@@ -184,15 +235,9 @@ def _direction(delta: float) -> str:
     return "up" if delta > 0 else "down" if delta < 0 else "unchanged"
 
 
-def _may_be_superseded(cached: dict, as_of: datetime, now: datetime) -> bool:
-    """Whether a live cycle should ask the source for a release newer than the cached one.
-
-    A replayed or backtested `as_of` reads only what was stored; a live one past the cached release's
-    refresh age may have a new release out (the cache returns the newest stored one, so it never sees it).
-    """
-    if now - as_of > LIVE_CYCLE_MAX_AGE:
-        return False
-    return as_of - release_instant(SOURCE, date.fromisoformat(cached["release_date"])) >= _REFRESH_AFTER
+def _lacks_figures(cached: dict, report: str) -> bool:
+    """A WASDE record stored before the parser kept the full supply/use rows."""
+    return report == "wasde" and "figures" not in cached
 
 
 def _get_release(
@@ -200,8 +245,16 @@ def _get_release(
     refresh: bool = False,
 ) -> dict | None:
     cached = read_pit(data_dir, source=SOURCE, report=report, symbol=symbol, as_of=as_of)
-    if cached is not None and not (refresh and _may_be_superseded(cached, as_of, now or datetime.now(timezone.utc))):
-        return cached
+    now = now or datetime.now(timezone.utc)
+    upgrade = False
+    if cached is not None:
+        due = refresh_due(
+            SOURCE, date.fromisoformat(cached["release_date"]), as_of=as_of, now=now, max_age=_REFRESH_AFTER
+        )
+        # A live cycle also re-reads a record stored before it had the full figures, to store it again with them.
+        upgrade = refresh and now - as_of <= LIVE_CYCLE_MAX_AGE and _lacks_figures(cached, report)
+        if not (refresh and due) and not upgrade:
+            return cached
 
     record = client.get_report(report, symbol, as_of=as_of)
     if record is None:
@@ -212,8 +265,23 @@ def _get_release(
     if not is_released(SOURCE, release_date, as_of):
         return cached
 
-    write_pit(data_dir, source=SOURCE, report=report, symbol=symbol, release_date=release_date, content=record)
+    same_release = cached is not None and cached["release_date"] == record["release_date"]
+    write_pit(
+        data_dir, source=SOURCE, report=report, symbol=symbol, release_date=release_date, content=record,
+        overwrite=upgrade and same_release,
+    )
     return record
+
+
+def _figure_changes(latest: dict) -> dict:
+    """Each figure's change from the previous month's forecast, as the same release states it."""
+    out = {}
+    for name, figure in (latest.get("figures") or {}).items():
+        if figure["prior"] is None:
+            continue
+        change = round(figure["value"] - figure["prior"], 4)
+        out[name] = {"value": figure["value"], "prior": figure["prior"], "change": change, "direction": _direction(change)}
+    return out
 
 
 def get_usda_report(
@@ -228,10 +296,20 @@ def get_usda_report(
     prior = _get_release(data_dir, report=report, symbol=symbol, as_of=just_before_latest, client=client)
     # A release for another marketing year is a different balance sheet, not an earlier view of this one.
     if prior is not None and prior["marketing_year"] == latest["marketing_year"]:
-        result["prior"] = prior
+        result["prior"] = {k: v for k, v in prior.items() if k != "figures"}
         change = {k: round(latest[k] - prior[k], 4) for k in _FIGURES}
         result["change"] = change
         result["revision_direction"] = _direction(change["ending_stocks"])
+    if changes := _figure_changes(latest):
+        result["figure_changes"] = changes
+        # The release states last month's forecast itself, so it still gives a revision when the earlier release
+        # is not stored.
+        if "change" not in result and "prior_stocks_to_use" in latest and "ending_stocks" in changes:
+            result["change"] = {
+                "ending_stocks": changes["ending_stocks"]["change"],
+                "stocks_to_use": round(latest["stocks_to_use"] - latest["prior_stocks_to_use"], 4),
+            }
+            result["revision_direction"] = changes["ending_stocks"]["direction"]
     return result
 
 

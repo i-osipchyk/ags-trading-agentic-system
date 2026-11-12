@@ -1,11 +1,11 @@
 import json
 
 import pytest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
-from ags.tools.pit_store import read_pit, write_pit
+from ags.tools.pit_store import read_pit, refresh_due, write_pit
 
 ET = ZoneInfo("America/New_York")
 
@@ -163,3 +163,30 @@ def test_pit_store_works_through_a_storage_and_keeps_the_on_disk_layout(tmp_path
     assert (written, again) == (True, False)
     assert result == {"n": 1}
     assert json.loads((tmp_path / "data" / "usda_esmis" / "wasde" / "corn" / "2026-01-15.json").read_text()) == {"n": 1}
+
+
+_SOURCE = "usda_esmis"
+_AS_OF = datetime(2026, 11, 10, 12, 30, tzinfo=ET)
+
+
+def test_refresh_is_due_for_a_live_cycle_once_the_cached_release_is_old_enough():
+    assert refresh_due(_SOURCE, date(2026, 10, 9), as_of=_AS_OF, now=_AS_OF + timedelta(minutes=5), max_age=timedelta(days=20))
+
+
+def test_refresh_is_not_due_while_the_cached_release_is_younger_than_max_age():
+    assert not refresh_due(_SOURCE, date(2026, 10, 25), as_of=_AS_OF, now=_AS_OF, max_age=timedelta(days=20))
+
+
+def test_refresh_is_never_due_for_a_replayed_as_of():
+    assert not refresh_due(_SOURCE, date(2026, 10, 9), as_of=_AS_OF, now=_AS_OF + timedelta(hours=2), max_age=timedelta(days=20))
+
+
+def test_write_pit_keeps_the_first_write_unless_asked_to_overwrite(tmp_path):
+    kwargs = dict(source="s", report="r", symbol="x", release_date=date(2026, 10, 9))
+
+    assert write_pit(tmp_path, content={"v": 1}, **kwargs) is True
+    assert write_pit(tmp_path, content={"v": 2}, **kwargs) is False
+    assert json.loads((tmp_path / "s" / "r" / "x" / "2026-10-09.json").read_text()) == {"v": 1}
+
+    assert write_pit(tmp_path, content={"v": 3}, overwrite=True, **kwargs) is True
+    assert json.loads((tmp_path / "s" / "r" / "x" / "2026-10-09.json").read_text()) == {"v": 3}

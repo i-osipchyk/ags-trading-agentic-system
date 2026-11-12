@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -13,6 +13,9 @@ ET = ZoneInfo("America/New_York")
 RELEASE_TIMES: dict[str, time] = {
     "usda_esmis": time(12, 0),
 }
+
+# A cycle whose scheduled time is at most this old is live; an older one is a replay and never fetches.
+LIVE_CYCLE_MAX_AGE = timedelta(hours=1)
 
 _END_OF_DAY = time.max
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H%M%S%fZ"
@@ -46,6 +49,20 @@ def is_released(source: str, release: date | datetime, as_of: datetime) -> bool:
     return release_instant(source, release) <= as_of
 
 
+def refresh_due(
+    source: str, cached_release: date | datetime, *, as_of: datetime, now: datetime, max_age: timedelta
+) -> bool:
+    """Whether a live cycle should ask the source again instead of trusting its cached release.
+
+    The cache returns the newest release stored by `as_of`, so on its own it never notices a newer one.
+    A replayed or backtested `as_of` (not live) reads only what was stored; a live one asks again once the
+    cached release is `max_age` old, the shortest gap a source's releases come at.
+    """
+    if now - as_of > LIVE_CYCLE_MAX_AGE:
+        return False
+    return as_of - release_instant(source, cached_release) >= max_age
+
+
 def _require_aware(as_of: datetime) -> None:
     if as_of.tzinfo is None:
         raise ValueError("as_of must be timezone-aware")
@@ -77,6 +94,12 @@ def write_pit(
     symbol: str,
     release_date: date | datetime,
     content: dict,
+    overwrite: bool = False,
 ) -> bool:
+    """Store a release under its own instant. First write wins unless `overwrite` (a schema upgrade of the same release)."""
     key = f"{source}/{report}/{symbol}/{_stem(release_date)}.json"
-    return as_storage(data_dir).put_if_absent(key, json.dumps(content).encode())
+    store = as_storage(data_dir)
+    if overwrite:
+        store.put(key, json.dumps(content).encode())
+        return True
+    return store.put_if_absent(key, json.dumps(content).encode())

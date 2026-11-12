@@ -6,7 +6,7 @@ from typing import Protocol
 import requests
 import shapefile
 
-from ags.tools.pit_store import ET, is_released, read_pit, write_pit
+from ags.tools.pit_store import ET, is_released, read_pit, refresh_due, write_pit
 
 SOURCE_DROUGHT = "usdm"
 REPORT_DROUGHT = "drought_severity"
@@ -14,6 +14,11 @@ SOURCE_OUTLOOK = "noaa_cpc"
 REPORT_OUTLOOK = "monthly_outlook"
 SOURCE_FORECAST = "open_meteo"
 REPORT_FORECAST = "forecast"
+
+# How old a cached release must be before a live cycle asks again: the Drought Monitor map is weekly, and
+# CPC issues an outlook about every two weeks (the month's update and the next month's first look).
+_DROUGHT_REFRESH_AFTER = timedelta(days=7)
+_OUTLOOK_REFRESH_AFTER = timedelta(days=14)
 
 _USDM_URL = "https://usdmdataservices.unl.edu/api/StateStatistics/GetDroughtSeverityStatisticsByArea"
 _OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
@@ -274,18 +279,23 @@ class USWeatherClient:
         return self._outlook.get_outlook(region, as_of=as_of)
 
 
-def _get_drought(data_dir, *, region: str, as_of: datetime, client: WeatherClient) -> dict | None:
+def _get_drought(
+    data_dir, *, region: str, as_of: datetime, client: WeatherClient, now: datetime | None = None
+) -> dict | None:
     cached = read_pit(data_dir, source=SOURCE_DROUGHT, report=REPORT_DROUGHT, symbol=region, as_of=as_of)
-    if cached is not None:
+    if cached is not None and not refresh_due(
+        SOURCE_DROUGHT, date.fromisoformat(cached["map_date"]), as_of=as_of, now=now or datetime.now(timezone.utc),
+        max_age=_DROUGHT_REFRESH_AFTER,
+    ):
         return cached
 
     record = client.get_drought_conditions(region, as_of=as_of)
     if record is None:
-        return None
+        return cached
     # Defensive PIT filter: the client's own date-scoping is a request, not
     # a guarantee, per CLAUDE.md's PIT hard constraint.
     if not is_released(SOURCE_DROUGHT, date.fromisoformat(record["map_date"]), as_of):
-        return None
+        return cached
 
     write_pit(
         data_dir,
@@ -298,18 +308,23 @@ def _get_drought(data_dir, *, region: str, as_of: datetime, client: WeatherClien
     return record
 
 
-def _get_outlook(data_dir, *, region: str, as_of: datetime, client: WeatherClient) -> dict | None:
+def _get_outlook(
+    data_dir, *, region: str, as_of: datetime, client: WeatherClient, now: datetime | None = None
+) -> dict | None:
     cached = read_pit(data_dir, source=SOURCE_OUTLOOK, report=REPORT_OUTLOOK, symbol=region, as_of=as_of)
-    if cached is not None:
+    if cached is not None and not refresh_due(
+        SOURCE_OUTLOOK, date.fromisoformat(cached["issued"]), as_of=as_of, now=now or datetime.now(timezone.utc),
+        max_age=_OUTLOOK_REFRESH_AFTER,
+    ):
         return cached
 
     record = client.get_outlook(region, as_of=as_of)
     if record is None:
-        return None
+        return cached
     # Defensive PIT filter: the client's own date-scoping is a request, not
     # a guarantee, per CLAUDE.md's PIT hard constraint.
     if not is_released(SOURCE_OUTLOOK, date.fromisoformat(record["issued"]), as_of):
-        return None
+        return cached
 
     write_pit(
         data_dir,
@@ -333,11 +348,13 @@ def _get_forecast(data_dir, *, region: str, as_of: datetime, client: WeatherClie
     return record
 
 
-def get_weather(data_dir, *, region: str, as_of: datetime, client: WeatherClient | None = None) -> dict:
+def get_weather(
+    data_dir, *, region: str, as_of: datetime, client: WeatherClient | None = None, now: datetime | None = None
+) -> dict:
     if client is None:
         client = USWeatherClient()
     if region in _OPEN_METEO_POINTS:
         return {"region": region, "forecast": _get_forecast(data_dir, region=region, as_of=as_of, client=client)}
-    drought = _get_drought(data_dir, region=region, as_of=as_of, client=client)
-    outlook = _get_outlook(data_dir, region=region, as_of=as_of, client=client)
+    drought = _get_drought(data_dir, region=region, as_of=as_of, client=client, now=now)
+    outlook = _get_outlook(data_dir, region=region, as_of=as_of, client=client, now=now)
     return {"region": region, "drought": drought, "outlook": outlook}
