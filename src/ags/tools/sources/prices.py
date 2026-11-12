@@ -33,7 +33,7 @@ from twisted.python.failure import Failure
 
 from ags.config import Config
 from ags.storage import as_storage
-from ags.tools.pit_store import ET, end_of_day, read_pit, write_pit
+from ags.tools.pit_store import ET, LIVE_CYCLE_MAX_AGE, end_of_day, read_pit, write_pit
 
 SOURCE = "ctrader"
 REPORT = "daily_bars"
@@ -487,8 +487,6 @@ def get_quote(
 # Lower timeframes a caller may ask for, with the bar length in seconds. All align to the UTC clock
 # (quarter, half and full hours), so a bar's end is a plain floor of the cutoff.
 INTRADAY_TIMEFRAMES = {"M15": 900, "M30": 1800, "H1": 3600}
-# A cycle whose scheduled time is at most this old is live; an older one is a replay and never fetches.
-LIVE_CYCLE_MAX_AGE = timedelta(hours=1)
 H1_REPORT = "h1_bars"
 # Longest look-back per timeframe, in days, so one request stays a sensible size.
 INTRADAY_MAX_DAYS = {"M15": 14, "M30": 30, "H1": 60}

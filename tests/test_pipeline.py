@@ -64,7 +64,28 @@ class FailingPricesClient:
         raise ConnectionError("cTrader connection refused")
 
 
-def _run(tmp_path, chat_client=None):
+class HeadlineNewsClient:
+    """Serves one article, so a headline the model reports can be traced to a search result."""
+
+    def __init__(self, headline=None):
+        self._headline = headline
+
+    def search(self, query, *, published_before):
+        if self._headline is None:
+            return []
+        return [{"headline": self._headline, "source": "example.com", "url": "https://example.com/a", "date": "2026-06-03", "snippet": ""}]
+
+
+def _news_reply(headline, direction="bullish"):
+    """A scripted News analyst: one search, then a report of what it found."""
+    search = {"id": "call_1", "function": {"name": "search_news", "arguments": json.dumps({"query": "corn"})}}
+    return [
+        {"role": "assistant", "content": None, "tool_calls": [search]},
+        {"role": "assistant", "content": json.dumps({"headlines": [{"headline": headline, "direction": direction}]}), "tool_calls": None},
+    ]
+
+
+def _run(tmp_path, chat_client=None, news_client=None):
     return run_pipeline(
         commodity="corn",
         as_of=AS_OF,
@@ -74,7 +95,7 @@ def _run(tmp_path, chat_client=None):
         log_dir=tmp_path / "logs",
         data_dir=tmp_path / "data",
         prices_client=FailingPricesClient(),
-        news_client=EmptyNewsClient(),
+        news_client=news_client or EmptyNewsClient(),
     )
 
 
@@ -237,9 +258,9 @@ def test_run_pipeline_returns_the_coordinators_call_and_logs_it(tmp_path):
 
 
 def test_run_pipeline_feeds_the_coordinator_exactly_the_four_analyst_outputs(tmp_path):
-    replies = {**_CANNED, "News analyst": {"headlines": [{"headline": "MARKER-NEWS"}]}}
+    replies = {**_CANNED, "News analyst": _news_reply("MARKER-NEWS")}
 
-    result = _run(tmp_path, RoutingChatClient(replies))
+    result = _run(tmp_path, RoutingChatClient(replies), HeadlineNewsClient("MARKER-NEWS"))
 
     events = _events(tmp_path, result["run_id"])
     coordinator_prompt = json.dumps(next(e for e in events if e["agent"] == "coordinator" and e["event_type"] == "prompt")["payload"])
@@ -374,17 +395,20 @@ class CountingNewsClient:
 
 
 def _cycle(tmp_path, when, chat_client=None, news_client=None):
+    chat_client = chat_client or RoutingChatClient()
     return run_pipeline(
-        commodity="corn", as_of=when, trigger_timestamp=when, chat_client=chat_client or RoutingChatClient(),
+        commodity="corn", as_of=when, trigger_timestamp=when, chat_client=chat_client,
         model="stub-model", log_dir=tmp_path / "logs", data_dir=tmp_path / "data",
-        prices_client=FailingPricesClient(), news_client=news_client or EmptyNewsClient(),
+        prices_client=FailingPricesClient(),
+        news_client=news_client or HeadlineNewsClient(getattr(chat_client, "headline", None)),
     )
 
 
-def _replies_with_headline(headline):
-    replies = dict(_CANNED)
-    replies["News analyst"] = {"headlines": [{"headline": headline, "direction": "bullish"}]}
-    return replies
+def _client_with_headline(headline):
+    """A model whose News analyst searches and reports `headline` (which the cycle's news client serves)."""
+    client = RoutingChatClient({**_CANNED, "News analyst": _news_reply(headline)})
+    client.headline = headline
+    return client
 
 
 def test_fetches_news_only_before_nine_et():
@@ -396,13 +420,15 @@ def test_fetches_news_only_before_nine_et():
 
 
 def test_morning_cycle_carries_the_evening_news_without_searching_or_calling_the_model(tmp_path):
-    evening = _cycle(tmp_path, FIRST, RoutingChatClient(_replies_with_headline("Corn rallies")))
+    evening = _cycle(tmp_path, FIRST, _client_with_headline("Corn rallies"))
     chat, news = RoutingChatClient(), CountingNewsClient()
 
     morning = _cycle(tmp_path, SECOND, chat, news)
 
     assert morning["outputs"]["news"] == {
-        "headlines": [{"headline": "Corn rallies", "direction": "bullish"}],
+        "headlines": [
+            {"headline": "Corn rallies", "direction": "bullish", "source": "example.com", "date": "2026-06-03", "url": "https://example.com/a"}
+        ],
         "degraded": False,
         "carried_forward": True,
         "source_run_id": evening["run_id"],
@@ -417,7 +443,7 @@ def test_morning_cycle_carries_the_evening_news_without_searching_or_calling_the
 
 
 def test_a_carried_output_points_at_the_run_that_searched_not_at_another_carry(tmp_path):
-    evening = _cycle(tmp_path, FIRST, RoutingChatClient(_replies_with_headline("Corn rallies")))
+    evening = _cycle(tmp_path, FIRST, _client_with_headline("Corn rallies"))
     _cycle(tmp_path, SECOND)
 
     # Off-schedule morning run an hour later: the newest log is a carry, so it is skipped.
@@ -428,7 +454,7 @@ def test_a_carried_output_points_at_the_run_that_searched_not_at_another_carry(t
 
 def test_morning_cycle_never_carries_news_from_after_its_as_of(tmp_path):
     later = datetime(2026, 6, 5, 12, 30, tzinfo=ET)
-    _cycle(tmp_path, later, RoutingChatClient(_replies_with_headline("From the future")))
+    _cycle(tmp_path, later, _client_with_headline("From the future"))
 
     morning = _cycle(tmp_path, SECOND)
 
@@ -438,7 +464,7 @@ def test_morning_cycle_never_carries_news_from_after_its_as_of(tmp_path):
 
 
 def test_monday_morning_carries_friday_evening_across_the_weekend(tmp_path):
-    friday = _cycle(tmp_path, datetime(2026, 6, 5, 6, 0, tzinfo=ET), RoutingChatClient(_replies_with_headline("Friday news")))
+    friday = _cycle(tmp_path, datetime(2026, 6, 5, 6, 0, tzinfo=ET), _client_with_headline("Friday news"))
 
     monday = _cycle(tmp_path, datetime(2026, 6, 8, 12, 30, tzinfo=ET))
 
@@ -446,7 +472,7 @@ def test_monday_morning_carries_friday_evening_across_the_weekend(tmp_path):
 
 
 def test_morning_cycle_with_no_recent_evening_run_is_degraded_and_empty(tmp_path):
-    _cycle(tmp_path, FIRST - timedelta(days=5), RoutingChatClient(_replies_with_headline("Old news")))
+    _cycle(tmp_path, FIRST - timedelta(days=5), _client_with_headline("Old news"))
 
     morning = _cycle(tmp_path, SECOND)
 

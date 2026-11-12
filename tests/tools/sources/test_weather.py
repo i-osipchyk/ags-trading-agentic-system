@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -174,3 +174,55 @@ def test_every_region_a_commodity_is_offered_can_be_fetched(tmp_path, monkeypatc
         client = us_client if region in weather.SUPPORTED_REGIONS else None
         result = get_weather(tmp_path, region=region, as_of=datetime(2026, 10, 30, 10, 0, tzinfo=ET), client=client)
         assert result["region"] == region
+
+
+IOWA_DROUGHT_NOV = {**IOWA_DROUGHT, "map_date": "2026-11-10", "d0_sq_mi": 100.0}
+IOWA_OUTLOOK_NOV = {**IOWA_OUTLOOK, "issued": "2026-10-31", "valid_period": "Nov 2026"}
+_NOV_CYCLE = datetime(2026, 11, 11, 6, 0, tzinfo=ET)
+
+
+def _cache_october(tmp_path):
+    old = FakeWeatherClient(drought_by_region={"IA": IOWA_DROUGHT}, outlook_by_region={"IA": IOWA_OUTLOOK})
+    get_weather(tmp_path, region="IA", as_of=datetime(2026, 10, 1, 16, 0, tzinfo=ET), client=old, now=datetime(2026, 10, 2, tzinfo=timezone.utc))
+
+
+def test_a_live_cycle_refreshes_a_stale_cached_drought_map_and_outlook(tmp_path):
+    _cache_october(tmp_path)
+    client = FakeWeatherClient(drought_by_region={"IA": IOWA_DROUGHT_NOV}, outlook_by_region={"IA": IOWA_OUTLOOK_NOV})
+
+    result = get_weather(tmp_path, region="IA", as_of=_NOV_CYCLE, client=client, now=_NOV_CYCLE + timedelta(minutes=6))
+
+    assert result["drought"] == IOWA_DROUGHT_NOV
+    assert result["outlook"] == IOWA_OUTLOOK_NOV
+    assert {f.stem for f in (tmp_path / "usdm" / "drought_severity" / "IA").glob("*.json")} == {"2026-09-29", "2026-11-10"}
+
+
+def test_a_replayed_as_of_reads_the_cached_weather_and_never_asks_the_source(tmp_path):
+    _cache_october(tmp_path)
+    client = FakeWeatherClient(drought_by_region={"IA": IOWA_DROUGHT_NOV}, outlook_by_region={"IA": IOWA_OUTLOOK_NOV})
+
+    result = get_weather(tmp_path, region="IA", as_of=_NOV_CYCLE, client=client, now=_NOV_CYCLE + timedelta(days=2))
+
+    assert result["drought"] == IOWA_DROUGHT
+    assert result["outlook"] == IOWA_OUTLOOK
+    assert client.drought_calls == [] and client.outlook_calls == []
+
+
+def test_a_recent_cached_drought_map_and_outlook_are_not_refreshed(tmp_path):
+    _cache_october(tmp_path)
+    client = FakeWeatherClient(drought_by_region={"IA": IOWA_DROUGHT_NOV}, outlook_by_region={"IA": IOWA_OUTLOOK_NOV})
+    as_of = datetime(2026, 10, 5, 6, 0, tzinfo=ET)  # 6 days after the map, 5 after the outlook
+
+    result = get_weather(tmp_path, region="IA", as_of=as_of, client=client, now=as_of)
+
+    assert result["drought"] == IOWA_DROUGHT
+    assert client.drought_calls == [] and client.outlook_calls == []
+
+
+def test_a_live_cycle_keeps_the_cached_weather_when_the_source_has_nothing(tmp_path):
+    _cache_october(tmp_path)
+
+    result = get_weather(tmp_path, region="IA", as_of=_NOV_CYCLE, client=FakeWeatherClient(), now=_NOV_CYCLE)
+
+    assert result["drought"] == IOWA_DROUGHT
+    assert result["outlook"] == IOWA_OUTLOOK

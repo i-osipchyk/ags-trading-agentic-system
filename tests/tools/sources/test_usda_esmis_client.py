@@ -1,5 +1,6 @@
 import re
 from datetime import date, datetime
+from xml.sax.saxutils import escape
 
 from ags.tools.sources import usda
 from ags.tools.sources.usda import EsmisClient
@@ -62,6 +63,8 @@ def test_esmis_client_parses_cotton_from_sep_2026_wasde(monkeypatch):
         "marketing_year": "2026/27 Proj.",
         "ending_stocks": 3.6,
         "stocks_to_use": 26.09,
+        "figures": {"total_use": {"value": 13.8, "prior": None}, "ending_stocks": {"value": 3.6, "prior": None}},
+        "units": usda._UNITS["cotton"],
     }
 
 
@@ -83,7 +86,71 @@ def test_esmis_client_parses_sugar_from_sep_2026_wasde(monkeypatch):
         "marketing_year": "2026/27 Proj.",
         "ending_stocks": 1697.0,
         "stocks_to_use": 13.5,
+        "figures": {"total_use": {"value": 12571.0, "prior": None}, "ending_stocks": {"value": 1697.0, "prior": None}},
+        "units": usda._UNITS["sugar"],
     }
+
+
+def _two_month_row(name: str, prior: str, value: str, year: str = "2026/27 Proj.") -> str:
+    tag = "attribute4"
+    return (
+        f'<{tag} {tag}="  {escape(name)}"><m1_year_group_Collection>'
+        f'<m1_year_group market_year4="{year}"><m1_month_group_Collection>'
+        f'<m1_month_group forecast_month4="Oct"><Cell cell_value4="{prior}" /></m1_month_group>'
+        f'<m1_month_group forecast_month4="Nov"><Cell cell_value4="{value}" /></m1_month_group>'
+        f"</m1_month_group_Collection></m1_year_group></m1_year_group_Collection></{tag}>"
+    )
+
+
+def _year_rows_xml(sub_report: str, matrix_idx: int, body: str) -> bytes:
+    matrices = "".join(
+        f"<matrix{i}><m1_attribute_group_Collection><m1_attribute_group>{body if i == matrix_idx else ''}"
+        f"</m1_attribute_group></m1_attribute_group_Collection></matrix{i}>"
+        for i in range(1, matrix_idx + 1)
+    )
+    return f"<WASDE><{sub_report}><Report>{matrices}</Report></{sub_report}></WASDE>".encode()
+
+
+def test_esmis_client_returns_the_supply_use_figures_with_last_months_forecast(monkeypatch):
+    # Figures from the real Nov 2026 WASDE, U.S. Corn Supply and Use: each row's last two cells are the
+    # previous and the latest month's forecast of the same marketing year.
+    rows = [
+        ("Yield per Harvested Acre", "181.2", "179.6"), ("Production 2/", "16,034", "15,893"), ("Exports", "3,300", "3,275"),
+        ("Ethanol & by-products 3/", "5,650", "5,650"), ("Use, Total", "16,305", "16,255"), ("Ending Stocks", "1,849", "1,758"),
+        ("Avg. Farm Price ($/bu) 4/", "4.70", "4.60"),
+    ]
+    _serve(monkeypatch, _year_rows_xml("sr12", 2, "".join(_two_month_row(*r) for r in rows)))
+
+    record = EsmisClient().get_report("wasde", "corn", as_of=datetime(2026, 11, 20, 16, 0, tzinfo=ET))
+
+    assert record["ending_stocks"] == 1758.0
+    assert record["prior_stocks_to_use"] == round(1849 / 16305 * 100, 2)
+    assert record["figures"]["yield"] == {"value": 179.6, "prior": 181.2}
+    assert record["figures"]["production"] == {"value": 15893.0, "prior": 16034.0}
+    assert record["figures"]["exports"] == {"value": 3275.0, "prior": 3300.0}
+    assert record["figures"]["ethanol_use"] == {"value": 5650.0, "prior": 5650.0}
+    assert record["figures"]["avg_farm_price"] == {"value": 4.6, "prior": 4.7}
+
+
+def test_a_projection_with_no_earlier_month_of_the_same_year_has_no_prior(monkeypatch):
+    # The year's first projection: the cell before it is the previous marketing year's estimate, not a revision.
+    def row(name: str, last_year: str, first_projection: str) -> str:
+        return (
+            f'<attribute4 attribute4="  {name}"><m1_year_group_Collection>'
+            f'<m1_year_group market_year4="2025/26 Est."><m1_month_group_Collection><m1_month_group forecast_month4="May">'
+            f'<Cell cell_value4="{last_year}" /></m1_month_group></m1_month_group_Collection></m1_year_group>'
+            f'<m1_year_group market_year4="2026/27 Proj."><m1_month_group_Collection><m1_month_group forecast_month4="May">'
+            f'<Cell cell_value4="{first_projection}" /></m1_month_group></m1_month_group_Collection></m1_year_group>'
+            f"</m1_year_group_Collection></attribute4>"
+        )
+
+    _serve(monkeypatch, _year_rows_xml("sr16", 1, row("Ending Stocks", "2095", "1849") + row("Total Use", "16451", "16305")))
+
+    record = EsmisClient().get_report("wasde", "sugar", as_of=datetime(2026, 9, 20, 16, 0, tzinfo=ET))
+
+    assert record["ending_stocks"] == 1849.0
+    assert record["figures"]["ending_stocks"]["prior"] is None
+    assert "prior_stocks_to_use" not in record
 
 
 _JUN_2025_LINES = [

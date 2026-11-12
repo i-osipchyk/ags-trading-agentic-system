@@ -107,6 +107,7 @@ def test_run_news_analyst_returns_schema_conformant_output_for_one_symbol(tmp_pa
             "date": "2026-06-01",
             "direction": "bullish",
             "reason": "Rising Chinese demand tightens the export balance.",
+            "url": "https://reuters.com/corn-exports",
         }
     ]
     assert result["degraded"] is False
@@ -226,3 +227,56 @@ def test_run_news_analyst_is_not_degraded_when_a_failed_search_succeeds_on_retry
 
     assert "retry" in json.loads(chat_client.calls[1]["messages"][-1]["content"])
     assert result == {"headlines": [], "degraded": False}
+
+
+def _headline(title, date_="2026-06-01", source="reuters.com"):
+    return {"headline": title, "source": source, "date": date_, "direction": "bullish", "reason": "r"}
+
+
+def _news_with_results(tmp_path, results, headlines):
+    chat_client = FakeChatClient(
+        [_tool_call_message("search_news", {"query": "corn futures news"}), _reply(json.dumps({"headlines": headlines}))]
+    )
+    return run_news_analyst(
+        tmp_path, chat_client, commodity="corn", as_of=datetime(2026, 6, 5, 16, 0, tzinfo=ET), model="m",
+        news_client=FakeNewsClient(results=results),
+    )
+
+
+def test_a_headlines_date_and_source_come_from_the_search_result_not_the_model(tmp_path):
+    # The model restated a Nov 9 article as Nov 10 and named another site as the source.
+    result = _news_with_results(
+        tmp_path, CORN_RESULTS, [_headline("Corn exports jump on strong Chinese demand", "2026-06-03", "somewhere.com")]
+    )
+
+    [headline] = result["headlines"]
+    assert headline["date"] == "2026-06-01"
+    assert headline["source"] == "reuters.com"
+    assert headline["url"] == "https://reuters.com/corn-exports"
+    assert headline["direction"] == "bullish"  # the model's own judgment is kept
+
+
+def test_a_headline_that_matches_no_search_result_is_dropped_and_counted(tmp_path):
+    result = _news_with_results(tmp_path, CORN_RESULTS, [_headline("Corn exports jump on strong Chinese demand"), _headline("Corn soars on invented story")])
+
+    assert [h["headline"] for h in result["headlines"]] == ["Corn exports jump on strong Chinese demand"]
+    assert result["dropped_untraceable"] == 1
+    assert result["degraded"] is False
+
+
+def test_a_slightly_reworded_title_still_matches_its_search_result(tmp_path):
+    result = _news_with_results(tmp_path, CORN_RESULTS, [_headline("Corn exports jump on strong Chinese demand!")])
+
+    assert result["headlines"][0]["headline"] == "Corn exports jump on strong Chinese demand"
+    assert "dropped_untraceable" not in result
+
+
+def test_the_same_story_from_two_sites_is_reported_once(tmp_path):
+    repost = {**CORN_RESULTS[0], "source": "finance.yahoo.com", "url": "https://finance.yahoo.com/corn-exports"}
+
+    result = _news_with_results(
+        tmp_path, [*CORN_RESULTS, repost],
+        [_headline("Corn exports jump on strong Chinese demand"), _headline("Corn exports jump on strong Chinese demand")],
+    )
+
+    assert len(result["headlines"]) == 1
