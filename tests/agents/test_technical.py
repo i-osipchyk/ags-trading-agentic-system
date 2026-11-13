@@ -66,7 +66,6 @@ def test_run_technical_analyst_returns_schema_conformant_output_for_one_symbol(t
                 "content": json.dumps(
                     {
                         "seasonality_alignment": "typical",
-                        "key_levels": {"recent_range": [4.40, 4.65], "breakout_points": [4.70]},
                         "chart_description": "Price has grinded steadily higher over the last 30 sessions, "
                         "holding above all EMAs with no material pullback.",
                     }
@@ -103,14 +102,18 @@ def test_run_technical_analyst_returns_schema_conformant_output_for_one_symbol(t
         "medium": {"state": "up", "age": 147},
         "long": {"state": "up", "age": 146},
     }
-    assert isinstance(result["volatility"]["current"], float)
-    assert isinstance(result["volatility"]["trailing_average"], float)
-    assert result["volatility"]["current"] >= 0
-    assert result["volatility"]["trailing_average"] >= 0
+    assert set(result["volatility"]) == {"realized_20d", "realized_100d", "ratio"}
+    assert result["volatility"]["realized_20d"] >= 0
+    assert result["volatility"]["realized_100d"] >= 0
+
+    # Key levels are code-computed too: a steady rally has no swing to resist or support it.
+    levels = result["key_levels"]
+    assert levels["reference"] == "last_close"
+    assert levels["recent_range"][1] == levels["reference_price"]
+    assert levels["resistance"] == [] and levels["support"] == []
 
     # Judgment-call fields come from the LLM's structured output.
     assert result["seasonality_alignment"] == "typical"
-    assert result["key_levels"] == {"recent_range": [4.40, 4.65], "breakout_points": [4.70]}
     assert result["chart_description"] == (
         "Price has grinded steadily higher over the last 30 sessions, "
         "holding above all EMAs with no material pullback."
@@ -177,11 +180,11 @@ def test_run_technical_analyst_degrades_instead_of_raising_when_the_model_never_
 
     assert result["degraded"] is True
     assert result["seasonality_alignment"] is None
-    assert result["key_levels"] is None
     assert result["chart_description"] is None
-    # Trend and volatility are computed by code, so they survive the model failure.
+    # Trend, volatility and key levels are computed by code, so they survive the model failure.
     assert result["trend"] is not None
     assert result["volatility"] is not None
+    assert result["key_levels"] is not None
 
 
 def test_run_technical_analyst_retries_once_when_the_first_reply_is_not_json(tmp_path):
@@ -223,7 +226,7 @@ def test_run_technical_analyst_keeps_code_facts_when_the_reply_is_json_but_not_a
 
 def test_run_technical_analyst_degrades_a_reply_with_a_mistyped_field_but_keeps_the_good_ones(tmp_path):
     as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
-    reply = {"seasonality_alignment": "typical", "key_levels": "around 450", "chart_description": "steady"}
+    reply = {"seasonality_alignment": "typical", "chart_description": 450}
     chat_client = FakeChatClient(responses=[{"role": "assistant", "content": json.dumps(reply), "tool_calls": None}])
 
     result = run_technical_analyst(
@@ -232,14 +235,13 @@ def test_run_technical_analyst_degrades_a_reply_with_a_mistyped_field_but_keeps_
     )
 
     assert result["degraded"] is True
-    assert result["key_levels"] is None
+    assert result["chart_description"] is None
     assert result["seasonality_alignment"] == "typical"
 
 # --- get_prices with a lower timeframe ---
 
 FINAL = {"role": "assistant", "tool_calls": None, "content": json.dumps({
-    "seasonality_alignment": "typical", "key_levels": {"recent_range": [1, 2], "breakout_points": []},
-    "chart_description": "x",
+    "seasonality_alignment": "typical", "chart_description": "x",
 })}
 
 
@@ -277,7 +279,7 @@ def test_the_tool_advertises_the_timeframes_and_the_prompt_explains_them(tmp_pat
     system = chat.calls[0]["messages"][0]["content"]
     assert '"tf"' in system and "H1" in system and "completed" in system
     tool = next(t for t in chat.calls[0]["tools"] if t["function"]["name"] == "get_prices")
-    assert tool["function"]["parameters"]["properties"]["tf"]["enum"] == ["D1", "M15", "M30", "H1"]
+    assert tool["function"]["parameters"]["properties"]["tf"]["enum"] == ["M15", "M30", "H1"]
 
 
 def test_an_hourly_request_returns_completed_utc_bars_and_includes_the_end_day(tmp_path):
@@ -392,3 +394,55 @@ def test_run_technical_analyst_degrades_but_keeps_everything_else_when_positioni
     assert result["degraded"] is True
     assert result["trend"]["short"]["state"] == "up"  # the price-derived facts are untouched
     assert "positioning" in chat_client.calls[0]["messages"][0]["content"]
+
+
+def _ask_nothing(tmp_path, *, reference_quote=None):
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
+    chat = FakeChatClient([FINAL])
+    result = run_technical_analyst(
+        tmp_path, chat, commodity="corn", as_of=as_of, model="m", history_days=550,
+        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of.date())}), reference_quote=reference_quote,
+    )
+    return result, chat.calls[0]
+
+
+def test_daily_candles_are_not_offered_as_a_tool_because_they_are_in_the_prompt(tmp_path):
+    _, call = _ask_nothing(tmp_path)
+
+    tool = next(t for t in call["tools"] if t["function"]["name"] == "get_prices")
+    assert "D1" not in tool["function"]["parameters"]["properties"]["tf"]["enum"]
+    assert "tf" in tool["function"]["parameters"]["required"]
+    assert "daily candles are not a tool" in call["messages"][0]["content"]
+
+
+def test_the_prompt_states_the_volatility_units_and_shows_plain_json_numbers(tmp_path):
+    _, call = _ask_nothing(tmp_path)
+
+    system = call["messages"][0]["content"]
+    assert "annualized" in system and "0.20 = 20% a year" in system
+    assert '"realized_20d"' in system and "np.float64" not in system
+    assert '"short": {"state"' in system  # the trend as JSON, not a Python repr
+
+
+def test_key_levels_are_read_against_the_live_quote_when_there_is_one(tmp_path):
+    quote = {"bid": 259.9, "ask": 260.1, "price": 260.0, "captured_at": "2026-06-05T16:00:05+00:00"}
+
+    result, call = _ask_nothing(tmp_path, reference_quote=quote)
+
+    assert result["key_levels"]["reference"] == "intraday_quote"
+    assert result["key_levels"]["reference_price"] == 260.0
+    assert '"reference": "intraday_quote"' in call["messages"][0]["content"]
+
+
+def test_the_model_is_not_asked_for_key_levels_and_a_reply_with_them_cannot_override_the_computed_ones(tmp_path):
+    as_of = datetime(2026, 6, 5, 16, 0, tzinfo=ET)
+    reply = {"seasonality_alignment": "typical", "chart_description": "x", "key_levels": {"recent_range": [0, 1]}}
+    chat = FakeChatClient([{"role": "assistant", "tool_calls": None, "content": json.dumps(reply)}])
+
+    result = run_technical_analyst(
+        tmp_path, chat, commodity="corn", as_of=as_of, model="m", history_days=550,
+        prices_client=FakePricesClient({"Corn": _rising_corn_bars(as_of.date())}),
+    )
+
+    assert '"key_levels"' not in chat.calls[0]["messages"][0]["content"].split("Respond with")[1]
+    assert result["key_levels"]["recent_range"] != [0, 1]

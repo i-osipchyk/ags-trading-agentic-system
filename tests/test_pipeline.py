@@ -12,7 +12,6 @@ TRIGGER = datetime(2026, 6, 5, 18, 30, 0, tzinfo=timezone.utc)
 _CANNED = {
     "Technical analyst": {
         "seasonality_alignment": "typical",
-        "key_levels": {"recent_range": [1, 2], "breakout_points": []},
         "chart_description": "flat",
     },
     "News analyst": {"headlines": []},

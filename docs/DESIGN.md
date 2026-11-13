@@ -39,13 +39,13 @@ Scheduled: **06:00 and 12:30 ET, Monday–Friday**, no weekend runs. These are t
 
 ## Technical analyst
 
-Trend, volatility, and seasonality context. Trend and volatility are computed deterministically by code; the agent's own judgment is reserved for the one place it adds value — whether the current move is typical or atypical for this point in the calendar.
+Trend, volatility, key levels, and seasonality context. Trend, volatility and key levels are computed deterministically by code; the agent's own judgment is reserved for the one place it adds value — whether the current move is typical or atypical for this point in the calendar — and for describing the chart.
 
 | Tool | Purpose |
 | --- | --- |
-| `get_prices(start, end, tf)` | Completed candles for its **own** commodity only (no other commodity). `tf` is `D1` (default; roll-adjusted closed daily bars), or `H1`, `M30`, `M15` (UTC open times, the newest 200 at most, look-back capped at 60, 30 and 14 days). A bar appears only once its period has closed. The live quote arrives in the prompt as a separately marked intraday price |
+| `get_prices(start, end, tf)` | Completed lower-timeframe candles for its **own** commodity only (no other commodity). `tf` is `H1`, `M30` or `M15` (UTC open times, the newest 200 at most, look-back capped at 60, 30 and 14 days). Daily candles are not a tool: the latest N closed daily bars are in the prompt (see Chart description). A bar appears only once its period has closed. The live quote arrives in the prompt as a separately marked intraday price |
 | `get_trend_state(symbol)` | Trend signal and its age (code-computed, not re-derived by the agent) |
-| `get_seasonality(symbol)` | Historical seasonal pattern for this calendar week |
+| `get_seasonality(symbol)` | The current ISO week's return in each prior year (from the previous week's close, so the weekend gap counts), their mean, median and spread, and this week's move so far to compare it with |
 
 **Correction to this version's tool list:** a `get_curve(symbol)` tool (term
 structure / calendar spreads) was originally planned here. Dropped — cTrader,
@@ -69,9 +69,9 @@ judgment-not-recomputation split as `seasonality_alignment`.
 | Field | Contents |
 | --- | --- |
 | `trend` | up / down / sideways, since when |
-| `volatility` | current vs. trailing average |
+| `volatility` | annualized realized volatility of daily log returns as a fraction: `realized_20d`, `realized_100d` (includes the last 20 sessions) and their `ratio` |
 | `seasonality_alignment` | typical or atypical for this calendar week |
-| `key_levels` | recent range, breakout points |
+| `key_levels` | code-computed from the daily bars: `recent_range` (last 20 sessions' low/high) and the nearest three swing-high `resistance` and swing-low `support` levels (a swing is a session whose high or low is beyond both neighbouring sessions', over the last 60 sessions), read against `reference_price` (the live quote when there is one, else the last close) |
 | `chart_description` | narrative read of the latest N candles + EMAs |
 | `degraded` | bool — true if an underlying source hasn't updated since this analyst's last run, or a tool call failed/timed out |
 
