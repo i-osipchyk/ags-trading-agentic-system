@@ -165,7 +165,12 @@ call (its tool allowlist) — never the tool implementation itself, so the
   beginning stocks, production, imports, exports, total use, ending stocks,
   price, and the main demand row), each with the previous month's forecast of
   the same marketing year as `prior`, so a revision never needs a second
-  fetch. The supply/demand analyst reports the figures that moved.
+  fetch. `compute_supply_demand` (`tools/supply_demand.py`) turns it into the
+  analyst's output with no model call: ending stocks and stocks-to-use first,
+  then every other figure that moved, largest relative change first, with
+  units; a trend of tightening/loosening/unchanged from stocks-to-use, and
+  `None` (not a guess) when there is nothing to compare with. A source failure
+  or no release yet gives an empty, `degraded` output.
 - **News headlines are tied to search results in code** (`ground_headlines`):
   the date, source and URL of each headline come from the search result, not
   the model; a headline matching no result is dropped (`dropped_untraceable`)

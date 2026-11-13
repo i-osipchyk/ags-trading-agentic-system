@@ -26,7 +26,7 @@ Scheduled: **06:00 and 12:30 ET, Monday–Friday**, no weekend runs. These are t
 
 1. The scheduler starts a cycle, tagged with a `cycle_id` and trigger timestamp.
 2. For each of the seven commodities, in parallel, a commodity pipeline runs under its own `run_id` (sharing the cycle's trigger timestamp):
-   1. Technical, News, Weather/Season, and Supply/Demand analysts run in parallel, each scoped to its own tools, blind to the other three and to the coordinator's running view.
+   1. Technical, News, Weather/Season, and Supply/Demand analysts run in parallel, each scoped to its own tools, blind to the other three and to the coordinator's running view. Supply/Demand is computed by code from the official releases (no model call, so no prompt in its log, only its output).
    2. Coordinator collects all four structured outputs and synthesizes a single call: bullish, bearish, or neutral, with conviction, thesis, and driver attribution — one call, 1-week horizon.
 3. Portfolio stage, once, after all seven pipelines finish (a failed commodity doesn't block it — that leg is held):
    1. Code builds the manager's inputs: the seven calls, current lots per symbol, ATR, $ value of 1 ATR per lot, equity, free margin.

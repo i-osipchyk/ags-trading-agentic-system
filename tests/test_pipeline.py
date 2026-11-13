@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from ags.logging.run_log import RunLog
 from ags.pipeline import run_pipeline
-from ags.tools.pit_store import ET
+from ags.tools.pit_store import ET, is_released
 
 AS_OF = datetime(2026, 6, 5, 6, 0, tzinfo=ET)
 TRIGGER = datetime(2026, 6, 5, 18, 30, 0, tzinfo=timezone.utc)
@@ -16,7 +16,6 @@ _CANNED = {
     },
     "News analyst": {"headlines": []},
     "Weather/season analyst": {"regions_covered": [], "current_conditions": {}, "risk_assessment": {}},
-    "Supply/demand analyst": {"latest_report": None, "key_figures": [], "stocks_to_use": None},
     "Coordinator": {
         "call": "neutral",
         "conviction": 1,
@@ -84,7 +83,18 @@ def _news_reply(headline, direction="bullish"):
     ]
 
 
-def _run(tmp_path, chat_client=None, news_client=None):
+class FakeUsdaClient:
+    """Serves the releases it is given that were public at as_of; none by default, so no test reaches ESMIS."""
+
+    def __init__(self, releases=()):
+        self._releases = list(releases)
+
+    def get_report(self, report, symbol, *, as_of):
+        eligible = [r for r in self._releases if is_released("usda_esmis", date.fromisoformat(r["release_date"]), as_of)]
+        return max(eligible, key=lambda r: r["release_date"]) if eligible else None
+
+
+def _run(tmp_path, chat_client=None, news_client=None, usda_client=None):
     return run_pipeline(
         commodity="corn",
         as_of=AS_OF,
@@ -95,6 +105,7 @@ def _run(tmp_path, chat_client=None, news_client=None):
         data_dir=tmp_path / "data",
         prices_client=FailingPricesClient(),
         news_client=news_client or EmptyNewsClient(),
+        usda_client=usda_client or FakeUsdaClient(),
     )
 
 
@@ -110,13 +121,13 @@ def _events(tmp_path, run_id):
     return RunLog(tmp_path / "logs", run_id).read()
 
 
-def test_run_pipeline_logs_prompt_and_output_for_every_analyst_with_contiguous_seq(tmp_path):
+def test_run_pipeline_logs_prompt_and_output_for_every_model_analyst_with_contiguous_seq(tmp_path):
     result = _run(tmp_path)
 
     events = _events(tmp_path, result["run_id"])
 
     assert [e["seq"] for e in events] == list(range(len(events)))
-    for agent in ("technical", "news", "weather", "supply_demand"):
+    for agent in ("technical", "news", "weather"):
         agent_events = [e for e in events if e["agent"] == agent]
         prompts = [e for e in agent_events if e["event_type"] == "prompt"]
         outputs = [e for e in agent_events if e["event_type"] == "output"]
@@ -124,6 +135,10 @@ def test_run_pipeline_logs_prompt_and_output_for_every_analyst_with_contiguous_s
         assert prompts[0]["payload"]["messages"][0]["role"] == "system"
         assert len(outputs) == 1
         assert outputs[0]["payload"] == result["outputs"][agent]
+    # Supply/demand is computed by code: an output and nothing else.
+    supply_demand = [e for e in events if e["agent"] == "supply_demand"]
+    assert [e["event_type"] for e in supply_demand] == ["output"]
+    assert supply_demand[0]["payload"] == result["outputs"]["supply_demand"]
 
 
 def test_run_pipeline_logs_each_tool_call_and_its_result_in_order(tmp_path):
@@ -200,7 +215,7 @@ def test_run_pipeline_gives_every_analyst_the_same_as_of(tmp_path):
     prompts = [e for e in _events(tmp_path, result["run_id"]) if e["event_type"] == "prompt"]
 
     analyst_prompts = [e for e in prompts if e["agent"] != "coordinator"]
-    assert len(analyst_prompts) == 4
+    assert len(analyst_prompts) == 3  # supply/demand is computed by code and has no prompt
     for event in analyst_prompts:
         assert "2026-06-05" in event["payload"]["messages"][0]["content"]
 
@@ -211,9 +226,8 @@ def test_run_pipeline_keeps_analysts_blind_to_each_others_output(tmp_path):
         "Technical analyst": {**_CANNED["Technical analyst"], "chart_description": "MARKER-TECH"},
         "News analyst": {"headlines": [{"headline": "MARKER-NEWS"}]},
         "Weather/season analyst": {**_CANNED["Weather/season analyst"], "current_conditions": {"IA": "MARKER-WX"}},
-        "Supply/demand analyst": {**_CANNED["Supply/demand analyst"], "latest_report": "MARKER-SD"},
     }
-    markers = {"technical": "MARKER-TECH", "news": "MARKER-NEWS", "weather": "MARKER-WX", "supply_demand": "MARKER-SD"}
+    markers = {"technical": "MARKER-TECH", "news": "MARKER-NEWS", "weather": "MARKER-WX"}
 
     result = _run(tmp_path, RoutingChatClient(replies))
 
@@ -400,6 +414,7 @@ def _cycle(tmp_path, when, chat_client=None, news_client=None):
         model="stub-model", log_dir=tmp_path / "logs", data_dir=tmp_path / "data",
         prices_client=FailingPricesClient(),
         news_client=news_client or HeadlineNewsClient(getattr(chat_client, "headline", None)),
+        usda_client=FakeUsdaClient(),
     )
 
 
@@ -518,3 +533,28 @@ def test_a_replayed_cycle_gets_no_reference_quote(tmp_path):
     assert result["call"]["price_at_call"]["kind"] == "daily_close"
     technical = next(m for m in chat.calls if "Technical analyst" in m[0]["content"])[0]["content"]
     assert "Intraday price: unavailable" in technical
+
+
+_JUN_RELEASE = {"release_date": "2026-06-01", "marketing_year": "2026/27 Proj.", "ending_stocks": 2100.0, "stocks_to_use": 13.1}
+
+
+def test_supply_demand_is_computed_by_code_without_calling_the_model_and_still_logged(tmp_path):
+    chat = RoutingChatClient()
+
+    result = _run(tmp_path, chat, usda_client=FakeUsdaClient([_JUN_RELEASE]))
+
+    expected = {
+        "latest_report": {"name": "WASDE", "date": "2026-06-01"},
+        "key_figures": [
+            {"figure": "ending_stocks (million bushels)", "value": 2100.0, "prior": None, "revision_direction": None},
+            {"figure": "stocks_to_use (%)", "value": 13.1, "prior": None, "revision_direction": None},
+        ],
+        "stocks_to_use": {"value": 13.1, "trend": None},
+        "demand_indicators": None,
+        "degraded": False,
+    }
+    assert result["outputs"]["supply_demand"] == expected
+    assert not any("Supply/demand analyst" in messages[0]["content"] for messages in chat.calls)
+    logged = [e for e in _events(tmp_path, result["run_id"]) if e["agent"] == "supply_demand"]
+    assert [e["event_type"] for e in logged] == ["output"]
+    assert logged[0]["payload"] == expected
