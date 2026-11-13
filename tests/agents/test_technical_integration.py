@@ -41,8 +41,8 @@ def test_run_technical_analyst_standalone_run_for_corn_against_real_sources(tmp_
     assert set(result["trend"].keys()) == {"short", "medium", "long"}
     for timeframe in result["trend"].values():
         assert timeframe["state"] in {"up", "down", "sideways"}
-    assert result["volatility"]["current"] >= 0
-    assert result["volatility"]["trailing_average"] >= 0
+    assert result["volatility"]["realized_20d"] >= 0
+    assert result["volatility"]["realized_100d"] >= 0
     assert result["seasonality_alignment"]
     assert isinstance(result["key_levels"], dict)
     assert result["chart_description"]
