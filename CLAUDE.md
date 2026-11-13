@@ -26,14 +26,18 @@ Per commodity, every cycle:
 
 - **Technical analyst** — trend, volatility, seasonality alignment. Also gets the
   **intraday** reference quote (clearly marked as not a closed bar); its `get_prices`
-  tool is bound to its own commodity and returns completed candles only: daily by default,
-  or lower timeframes via `tf` (M15, M30, H1)
+  tool is bound to its own commodity and returns completed candles only, on the lower
+  timeframes via `tf` (M15, M30, H1); the latest daily candles are in its prompt
 - **News analyst** — recent headlines, deduped, no commentary. Searches (Tavily) on
   the 06:00 ET cycle only; at 12:30 it carries the latest searched output forward
   (`carried_forward`, `source_run_id`), with no search and no model call
 - **Weather/season analyst** — regional conditions + crop growth stage
 - **Supply/demand analyst** — USDA/UNICA/Conab/ISO report data (plus
-  ICO/ICCO/ICAC for coffee/cocoa/cotton as needed — see `ARCHITECTURE.md`)
+  ICO/ICCO/ICAC for coffee/cocoa/cotton as needed — see `ARCHITECTURE.md`).
+  **Computed by code, no model call** (`tools/supply_demand.py`): the same output
+  shape, new numbers once a release is public. The LLM version
+  (`agents/supply_demand.py`) is kept unwired as the base for a later analyst
+  with web grounding
 - **Coordinator** — synthesizes the four into one call. Also reads its own
   track record (`read_track_record`: past calls joined with whatever audit
   checkpoints exist for them) — coordinator-only, not extended to the four

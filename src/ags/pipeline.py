@@ -6,7 +6,6 @@ from pathlib import Path
 
 from ags.agents.coordinator import run_coordinator
 from ags.agents.news import carry_forward_news, fetches_news, run_news_analyst
-from ags.agents.supply_demand import run_supply_demand_analyst
 from ags.agents.technical import run_technical_analyst
 from ags.agents.weather import run_weather_analyst
 from ags.llm.client import bind, trace
@@ -16,6 +15,8 @@ from ags.logging.run_log import RunLog
 from ags.storage import LocalStorage, as_storage
 from ags.tools.pit_store import ET
 from ags.tools.sources.prices import LIVE_CYCLE_MAX_AGE, get_prices, get_quote
+from ags.tools.sources.usda import EsmisClient
+from ags.tools.supply_demand import compute_supply_demand
 from ags.tools.track_record import read_track_record
 
 
@@ -180,8 +181,10 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
         "weather": lambda: run_weather_analyst(
             data_dir, _client("weather"), weather_client=weather_client, **common
         ),
-        "supply_demand": lambda: run_supply_demand_analyst(
-            data_dir, _client("supply_demand"), usda_client=usda_client, grinds_client=grinds_client, **common
+        # Computed by code from the official releases, so it makes no model call and has no prompt to log.
+        "supply_demand": lambda: compute_supply_demand(
+            data_dir, commodity=commodity, as_of=as_of, usda_client=usda_client or EsmisClient(),
+            grinds_client=grinds_client, now=now,
         ),
     }
 
