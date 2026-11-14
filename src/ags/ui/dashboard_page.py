@@ -38,7 +38,7 @@ def _drawdown(label: str, curve: list[float]) -> None:
 
 
 @st.fragment(run_every=3)
-def _job_banner(jobs_dir: Path) -> None:
+def job_banner(jobs_dir: Path) -> None:
     job = current_job(jobs_dir)
     if job is None:
         return
@@ -142,7 +142,7 @@ def render_dashboard_page(
         pull()
         st.rerun()
     days = _RANGES[range_col.radio("Range", list(_RANGES), horizontal=True, key="range")]
-    _job_banner(jobs_dir)
+    job_banner(jobs_dir)
 
     full = {book: load_cycles(storage, book, now=current) for book in ("manager", "shadow")}
     cycles = {book: load_cycles(storage, book, now=current, days=days) for book in ("manager", "shadow")}

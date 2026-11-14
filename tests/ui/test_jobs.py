@@ -154,7 +154,10 @@ def test_output_without_run_ids_produces_none():
     assert produced_run_ids("graded corn_2026-10-02T15-40-41Z 1w\n1 graded, 0 failed") == []
 
 
-def test_sync_commands_pull_only_what_the_dashboard_reads():
+def test_sync_commands_pull_only_what_the_ui_reads():
     from ags.ui.jobs import sync_commands
 
-    assert _args(sync_commands()) == [["scripts/sync_local.sh", "portfolio", "logs", "attempts"]]
+    assert _args(sync_commands()) == [
+        ["scripts/sync_local.sh", "portfolio", "logs", "attempts", "data"],
+        ["scripts/fetch_candles.py"],
+    ]

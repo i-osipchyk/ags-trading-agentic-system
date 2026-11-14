@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Pull-only mirror of the official S3 record into data/, logs/, audits/, portfolio/ and attempts/.
 # Nothing here ever writes to the bucket: S3 is the source of truth, local is a read-only copy.
-# Usage: scripts/sync_local.sh [--dryrun] [prefix...]   (no prefix = all of them; the dashboard pulls
-#        portfolio logs attempts). AGS_BUCKET overrides the default ags-live-data-<account>.
+# Usage: scripts/sync_local.sh [--dryrun] [prefix...]   (no prefix = all of them; the UI pulls
+#        portfolio logs attempts data). AGS_BUCKET overrides the default ags-live-data-<account>.
 set -euo pipefail
 
 export AWS_REGION="${AWS_REGION:-eu-west-1}"

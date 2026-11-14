@@ -62,13 +62,15 @@ src/ags/
     metrics.py       # equity curves, manager-vs-shadow P&L, spend rollups
   notify/            # Telegram client, alerts, daily digest (v3)
   handlers/          # Lambda entry points — thin wrappers, no logic (v3)
-  ui/                # Streamlit app: dashboard (dashboard, dashboard_page), runs grid + job control (runs, jobs, runs_page), chat (chat, streamlit_app)
+  ui/                # Streamlit app: dashboard (dashboard, dashboard_page), runs grid + job control (runs, jobs, runs_page), scorecard (scorecard_page), chat (chat, streamlit_app)
 scripts/                 # every CLI and helper script
   run_pipeline.py        # one commodity run (local, unofficial namespace)
   run_cycle.py           # full cycle locally — 7 pipelines + portfolio stage (v3, unofficial)
   run_auditor.py         # trigger due checkpoint evaluations (all, or one via --run-id/--weeks)
-  run_chat.py            # Streamlit app: dashboard (default), runs grid, chat over frozen runs
-  sync_local.sh          # pull-only S3 → local mirror (v3); optional prefix args (the dashboard pulls portfolio logs attempts)
+  run_chat.py            # Streamlit app: dashboard (default), runs grid, scorecard, chat over frozen runs
+  fetch_candles.py       # fill the local daily-candle cache to the last closed session (cTrader market data; the pull job runs it)
+  run_scorecard.py       # score the logged calls against the baselines, printed (read-only, local mirror)
+  sync_local.sh          # pull-only S3 → local mirror (v3); optional prefix args (the UI pulls portfolio logs attempts data)
   put_secrets.py         # .env → SSM /ags/<env>/* (v3)
   wait_for_cycle.sh      # deploy pre-apply: wait for no RUNNING cycle (v3)
   migrate_to_s3.py       # one-off: seed the bucket from a pre-v3 checkout (v3)
@@ -226,6 +228,17 @@ The fixture suite gains intraday cases: same-day release before vs after
   `run_id` = `{commodity}_{trigger_timestamp}` (e.g.
   `corn_2026-09-11T18-30-00Z`). Each line:
   `{seq, agent, event_type: prompt|tool_call|tool_result|output, payload, timestamp}`.
+- **Run events beyond the four above:** each commodity run opens with a `pipeline`/`version`
+  event, `{code_version, prompt_hashes, model}`: the git SHA the image was built from
+  (`GIT_SHA`, else the checkout's HEAD) and a 12-character hash per model agent's system prompt
+  template (`technical`, `news`, `weather`, `coordinator`, plus `all`), so a scorecard can be cut
+  by version (`versioning.py`). After the analysts finish it logs `pipeline`/`freshness`, one
+  entry per source: `{source, latest, age_days, max_age_days, stale, detail}` (`freshness.py`).
+  Limits: drought map 10 days, CPC outlook 40, WASDE or other supply/demand report 40, cocoa grinds
+  120, news 3 days on its newest headline. Drought and outlook read the newest stored release over the
+  commodity's US regions (the oldest sets the age); commodities with only non-US regions have neither
+  entry. A source with nothing at all is stale. `blocked` (see § Retrying a held cycle) is the other
+  `pipeline` event.
 - **Replay = deterministic reconstruction, never live re-execution.**
   "Replayable" means the log alone lets you reconstruct exactly what each
   agent saw and said, by replaying recorded tool results — never by
@@ -287,6 +300,23 @@ revisit.
   due") require a confirmation click. Logic lives in `ags.ui.runs`
   (`build_grid`) and `ags.ui.jobs` (cadence, locking, command builders);
   `ags.ui.runs_page` is rendering only.
+- **Scorecard:** its own page (`ui/scorecard_page.py`, also `scripts/run_scorecard.py`), scoring the
+  official coordinator calls from the local mirror with no model call and no write
+  (`ags/scoring.py`). Each call is entered at its `price_at_call` and exited at the 1st (1-day) or 5th
+  (1-week) daily close counting from its own day, so a call is scored only once that close is in the mirror;
+  the page warns when `data/ctrader/daily_bars/` lags the newest log, and has the same "Pull latest data" button (S3 sync, then `scripts/fetch_candles.py`, which asks cTrader for the daily candles the cycles never requested and caches them under `data/` only, market data and never S3) and job banner as the Dashboard. Baselines on the same rows: always
+  long, always short, the medium-trend rule (as the auditor's `trend_benchmark`), plus the coordinator
+  (bullish +1, bearish -1, neutral 0). A candle file is named by cTrader's stamp, the evening before its session, so closes are dated `_session_date(stamp)` as `get_prices` does. Returns are raw or market-neutral (minus the mean return of the calls in
+  the same cycle, needing at least 4). Each commodity counts once per ISO week of the call (its calls that week share a
+  weight of 1; a week with fewer than the 10 scheduled calls, such as a one-off dev run or the week in progress,
+  is worth its share), so the effective count is commodity-weeks and effective weeks are the calendar weeks of
+  evidence. "Since" defaults to `scoring.REVIEW_START`, 2026-10-13, the first scheduled-cycle day, until the
+  owner's clean start date replaces it;
+  intervals are bootstrapped over the same (commodity, ISO week) clusters. Cuts: by week,
+  commodity, code/prompt version (`pipeline`/`version` event; older runs "unversioned"), stated conviction (directional calls only; scoring itself ignores conviction, every call is a full position) and bullish/bearish. The
+  pass bar is `scoring.PASS_BAR`, fixed in code: at 1 week, market-neutral, the coordinator beats the trend
+  rule with the 90% interval of the difference above zero, over at least 8 effective weeks (effective calls / 7),
+  at least 2 of which the basket did not fall; until the sample is that large the verdict is "not yet testable".
 - **Dashboard:** the app's default page; the runs grid and chat stay as they were. It charts the
   paper books over time from the local mirror (`portfolio/{manager,shadow}/cycles/`, `logs/`,
   `attempts/`), on a UTC axis with All / 30d / 7d ranges: equity for both books with the
@@ -298,7 +328,7 @@ revisit.
   and commission are not in it); and LLM spend per UTC day (only days with a cost), stacked by commodity or agent, with the running
   total as a line on a right-hand axis over the selected range (`notify.spend.daily_spend`; retried
   attempts included, unpriced calls left out). "Pull latest data" runs
-  `scripts/sync_local.sh portfolio logs attempts` through the same one-job runner. It is read-only
+  `scripts/sync_local.sh portfolio logs attempts data`, then `scripts/fetch_candles.py`, through the same one-job runner. It is read-only
   and local like the rest of the app. Logic is in `ags.ui.dashboard` (pure pandas frames);
   `ags.ui.dashboard_page` is rendering only.
 
@@ -368,7 +398,7 @@ past calls against how they graded out, and adjust emphasis accordingly
 | --- | --- | --- |
 | DeepSeek V4.1 Flash | All agents (model) | OpenAI-compatible API, hand-rolled loop |
 | cTrader Open API | `get_prices` | Official Spotware Python SDK (Twisted-based), wrapped with `crochet` to expose an asyncio-facing interface; credentials via env vars the user provides |
-| Tavily | News analyst search | LLM-shaped search API; free tier (1,000 credits/mo). Searched on the 06:00 ET cycle only (the 12:30 cycle carries the output forward, `agents/news.py`): worst case 7 commodities × 5 tool calls × ~22 weekdays ≈ 770 credits/mo, vs ≈ 1,540 if both cycles searched |
+| Tavily | News analyst search | LLM-shaped search API; free tier (1,000 credits/mo). Searched on the 06:00 ET cycle only (the 12:30 cycle carries the output forward, `agents/news.py`). Tavily cannot reproduce a past search, so each search also stores the unfiltered response with its fetch time under `tavily/search_raw/<commodity>_<query hash>/` (`fetched_at`, `query`, `response`), next to the date-filtered `search_news` record: worst case 7 commodities × 5 tool calls × ~22 weekdays ≈ 770 credits/mo, vs ≈ 1,540 if both cycles searched |
 | USDA ESMIS archive | WASDE, Crop Progress, Export Sales | Scrape/parse the dated release archive directly — **not** PSD Online or NASS Quick Stats, both of which return latest-revised values rather than as-published figures |
 | UNICA / Conab / ISO | Sugar & Brazilian crop supply | Scrape/parse each body's public release archive into the PIT store, same pattern as ESMIS |
 | ICO / ICCO / ICAC | Coffee / cocoa / cotton supply-demand | Same scrape/parse pattern; built lazily, one per commodity, only when that commodity is actually worked on |
@@ -635,7 +665,9 @@ the shared pair with the developer's AWS credentials for any `CTRADER_*` key
   handler's exception propagates, so that cause names the commodity or cycle.
   Direct alerts come from the portfolio Lambda (cycle held by a blocking
   provider error, credit running low, manager failed, commodity failed two
-  cycles running, breaker tripped). A failed cTrader token refresh alarms
+  cycles running, breaker tripped, and once a day, on the 06:00 ET cycle, the
+  commodities whose source data is older than expected, from each commodity
+  Lambda's `stale_sources`; see § Logging and replay). A failed cTrader token refresh alarms
   from the platform.
 - **Digest:** the `digest` Lambda is the last step of the cycle state machine, so a
   digest follows every cycle, and reads the latest two cycle files of each book and the run logs from S3. LLM

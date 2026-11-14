@@ -2,6 +2,7 @@ import logging
 from datetime import datetime
 
 from ags import blockers
+from ags.agents.news import fetches_news
 from ags.handlers.runtime import Runtime, check_late_start, cycle_id_for
 from ags.logging import attempts
 from ags.logging.run_id import generate_run_id
@@ -41,6 +42,16 @@ def _check_credit(runtime: Runtime, event: dict, cycle_id: str) -> None:
         min_cycles=runtime.min_cycles_of_credit,
     ):
         runtime.alert(message)
+
+
+def _alert_stale(runtime: Runtime, event: dict, scheduled: datetime) -> None:
+    """Once a day (the cycle that searches news), name every commodity whose source data is older than expected."""
+    if not fetches_news(scheduled):
+        return
+    stale = {r["commodity"]: r["stale_sources"] for r in event["results"] if r.get("stale_sources")}
+    if stale:
+        lines = "; ".join(f"{commodity}: {', '.join(sources)}" for commodity, sources in sorted(stale.items()))
+        runtime.alert(f"Stale source data in {scheduled:%Y-%m-%d %H:%M} UTC cycle: {lines}")
 
 
 def handle(event: dict, runtime: Runtime) -> dict:
@@ -90,6 +101,10 @@ def handle(event: dict, runtime: Runtime) -> dict:
             runtime.alert(f"Commodity pipeline failed two cycles running: {', '.join(failing)}")
         if breaker_newly_tripped(runtime.storage, store):
             runtime.alert(f"Drawdown breaker tripped in {cycle_id}: reductions only until reset")
+    try:
+        _alert_stale(runtime, event, scheduled)
+    except Exception as exc:  # an alert is not worth failing a cycle that's already done
+        logger.warning("stale-data alert failed for %s: %s", cycle_id, exc)
     try:
         _check_credit(runtime, event, cycle_id)
     except Exception as exc:  # a failed check must not fail a cycle that's already done

@@ -18,7 +18,8 @@ https://claude.ai/artifact/3rEgJWBSqQh6ZtERuy37dC — the in-repo
 
 Implementation-level technical architecture (runtime, data layer, external
 sources, logging format, AWS deployment, and everything else *how*-shaped):
-`docs/ARCHITECTURE.md`. Build order: `docs/IMPLEMENTATION_PLAN.md`.
+`docs/ARCHITECTURE.md`. Build order: `docs/IMPLEMENTATION_PLAN.md`. Next steps
+after the first month (a proposal, with the evidence behind it): `docs/ROADMAP.md`.
 
 ## Architecture
 

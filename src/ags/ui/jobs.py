@@ -105,8 +105,13 @@ def audit_commands(*, run_id: str | None = None, weeks: int | None = None) -> li
 
 
 def sync_commands() -> list[list[str]]:
-    """Pull-only sync of what the dashboard reads: the paper books, the portfolio logs and the retried attempts."""
-    return [["bash", str(_ROOT / "scripts" / "sync_local.sh"), "portfolio", "logs", "attempts"]]
+    """Pull what the UI reads: the S3 mirror (paper books, portfolio and run logs, retried attempts, data), then the
+    daily candles the cycles never asked for, so the scorecard can grade the newest calls. The mirror step is
+    pull-only; the candle step writes only the local cache."""
+    return [
+        ["bash", str(_ROOT / "scripts" / "sync_local.sh"), "portfolio", "logs", "attempts", "data"],
+        [sys.executable, str(_ROOT / "scripts" / "fetch_candles.py")],
+    ]
 
 
 def produced_run_ids(output: str) -> list[str]:

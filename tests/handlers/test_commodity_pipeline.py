@@ -61,7 +61,7 @@ def test_commodity_whose_coordinator_fails_is_passed_through_as_null(tmp_path):
 
     result = handle(_event(), runtime)
 
-    assert result == {"commodity": "corn", "failed": True, "call": None, "blocked": {}}
+    assert result["failed"] is True and result["call"] is None and result["blocked"] == {}
 
 
 class OutOfBalance(Exception):

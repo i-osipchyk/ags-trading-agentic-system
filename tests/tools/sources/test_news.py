@@ -120,3 +120,27 @@ def test_fetch_document_second_call_for_same_url_is_a_noop(tmp_path):
 
     assert second == first
     assert client.extract_calls == [CORN_ARTICLE_URL]
+
+
+def test_search_news_keeps_the_providers_raw_response_with_the_fetch_time(tmp_path):
+    client = FakeNewsClient(CORN_RESULTS)
+    client.last_raw_response = {"results": [{"title": "kept even if filtered out"}], "response_time": 1.2}
+
+    search_news(
+        tmp_path, commodity="corn", query="corn futures news", as_of=datetime(2026, 6, 5, 16, 0, tzinfo=ET),
+        client=client,
+    )
+
+    stored = [json.loads(p.read_text()) for p in (tmp_path / "tavily" / "search_raw").glob("*/*.json")]
+    assert len(stored) == 1
+    assert stored[0]["response"] == client.last_raw_response
+    assert stored[0]["query"] == "corn futures news" and stored[0]["fetched_at"]
+
+
+def test_search_news_without_raw_capture_stores_no_raw_record(tmp_path):
+    search_news(
+        tmp_path, commodity="corn", query="q", as_of=datetime(2026, 6, 5, 16, 0, tzinfo=ET),
+        client=FakeNewsClient(CORN_RESULTS),
+    )
+
+    assert not (tmp_path / "tavily" / "search_raw").exists()
