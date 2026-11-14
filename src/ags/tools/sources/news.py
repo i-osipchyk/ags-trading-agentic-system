@@ -1,5 +1,5 @@
 import hashlib
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Protocol
 from urllib.parse import urlparse
 
@@ -14,6 +14,7 @@ from ags.tools.pit_store import ET, is_released, read_pit, write_pit
 SOURCE = "tavily"
 REPORT_SEARCH = "search_news"
 REPORT_DOCUMENTS = "documents"
+REPORT_RAW = "search_raw"
 
 _MAX_SEARCH_RESULTS = 10
 
@@ -24,6 +25,8 @@ _BLOCKING_ERRORS = (ForbiddenError, InvalidAPIKeyError)
 
 class NewsClient(Protocol):
     def search(self, query: str, *, published_before: date) -> list[dict]: ...
+    # Optional: the provider's untouched response to the last `search`, kept beside the filtered results.
+    # last_raw_response: dict | None
     def extract(self, url: str) -> dict: ...
 
 
@@ -56,6 +59,7 @@ def _normalize_date(raw: str | None) -> str | None:
 class TavilyNewsClient:
     def __init__(self, config: Config):
         self._client = TavilyClient(api_key=config.tavily_api_key)
+        self.last_raw_response: dict | None = None
 
     def search(self, query: str, *, published_before: date) -> list[dict]:
         response = self._call(
@@ -65,6 +69,7 @@ class TavilyNewsClient:
             end_date=published_before.isoformat(),
             max_results=_MAX_SEARCH_RESULTS,
         )
+        self.last_raw_response = response
         return [
             {
                 "headline": item.get("title"),
@@ -119,6 +124,16 @@ def search_news(
         for result in raw_results
         if result.get("date") is not None and is_released(SOURCE, date.fromisoformat(result["date"]), as_of)
     ]
+
+    raw_response = getattr(client, "last_raw_response", None)
+    if raw_response is not None:
+        # Tavily cannot reproduce a past search, so what it returned, before any filtering, is kept with the time
+        # of the fetch (the filtered record only holds what survived the date filter).
+        write_pit(
+            data_dir, source=SOURCE, report=REPORT_RAW, symbol=symbol, release_date=as_of,
+            content={"as_of": as_of.isoformat(), "fetched_at": datetime.now(timezone.utc).isoformat(),
+                     "query": query, "response": raw_response},
+        )
 
     write_pit(
         data_dir,

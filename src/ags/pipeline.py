@@ -8,6 +8,7 @@ from ags.agents.coordinator import run_coordinator
 from ags.agents.news import carry_forward_news, fetches_news, run_news_analyst
 from ags.agents.technical import run_technical_analyst
 from ags.agents.weather import run_weather_analyst
+from ags.freshness import source_freshness
 from ags.llm.client import bind, trace
 from ags.llm.loop import ChatClient
 from ags.logging.run_id import generate_run_id
@@ -18,6 +19,7 @@ from ags.tools.sources.prices import LIVE_CYCLE_MAX_AGE, get_prices, get_quote
 from ags.tools.sources.usda import EsmisClient
 from ags.tools.supply_demand import compute_supply_demand
 from ags.tools.track_record import read_track_record
+from ags.versioning import version_stamp
 
 
 class _SharedRunLog:
@@ -162,6 +164,7 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
          log_dir, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, cot_client, grinds_client, now) -> dict:
     reference = _reference_quote(data_dir, commodity, as_of, prices_client, now)
     run_log = _SharedRunLog(raw_log)
+    run_log.append(agent="pipeline", event_type="version", payload={**version_stamp(), "model": model})
     common = {"commodity": commodity, "as_of": as_of, "model": model}
 
     def _client(agent: str) -> LoggingChatClient:
@@ -203,6 +206,8 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
     outputs = dict(zip(analysts, asyncio.run(_fan_out())))
     for agent, output in outputs.items():
         run_log.append(agent=agent, event_type="output", payload=output)
+    freshness = source_freshness(data_dir, commodity=commodity, as_of=as_of, outputs=outputs)
+    run_log.append(agent="pipeline", event_type="freshness", payload={"sources": freshness})
 
     track_record = None
     if audit_dir is not None:
@@ -225,4 +230,5 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
     except Exception as exc:
         call = {"call": None, "degraded": True, "error": f"{type(exc).__name__}: {exc}"}
     run_log.append(agent="coordinator", event_type="output", payload=call)
-    return {"run_id": run_id, "outputs": outputs, "call": call}
+    stale = [entry["source"] for entry in freshness if entry["stale"]]
+    return {"run_id": run_id, "outputs": outputs, "call": call, "stale_sources": stale}

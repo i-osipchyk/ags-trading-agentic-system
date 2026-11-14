@@ -52,7 +52,7 @@ def handle(event: dict, runtime: Runtime) -> dict:
     call = result["call"]
     return {
         "commodity": commodity, "failed": not call.get("call"), "call": call if call.get("call") else None,
-        "blocked": blocked,
+        "blocked": blocked, "stale_sources": result["stale_sources"],
     }
 
 
