@@ -62,13 +62,15 @@ src/ags/
     metrics.py       # equity curves, manager-vs-shadow P&L, spend rollups
   notify/            # Telegram client, alerts, daily digest (v3)
   handlers/          # Lambda entry points — thin wrappers, no logic (v3)
-  ui/                # Streamlit app: dashboard (dashboard, dashboard_page), runs grid + job control (runs, jobs, runs_page), chat (chat, streamlit_app)
+  ui/                # Streamlit app: dashboard (dashboard, dashboard_page), runs grid + job control (runs, jobs, runs_page), scorecard (scorecard_page), chat (chat, streamlit_app)
 scripts/                 # every CLI and helper script
   run_pipeline.py        # one commodity run (local, unofficial namespace)
   run_cycle.py           # full cycle locally — 7 pipelines + portfolio stage (v3, unofficial)
   run_auditor.py         # trigger due checkpoint evaluations (all, or one via --run-id/--weeks)
-  run_chat.py            # Streamlit app: dashboard (default), runs grid, chat over frozen runs
-  sync_local.sh          # pull-only S3 → local mirror (v3); optional prefix args (the dashboard pulls portfolio logs attempts)
+  run_chat.py            # Streamlit app: dashboard (default), runs grid, scorecard, chat over frozen runs
+  fetch_candles.py       # fill the local daily-candle cache to the last closed session (cTrader market data; the pull job runs it)
+  run_scorecard.py       # score the logged calls against the baselines, printed (read-only, local mirror)
+  sync_local.sh          # pull-only S3 → local mirror (v3); optional prefix args (the UI pulls portfolio logs attempts data)
   put_secrets.py         # .env → SSM /ags/<env>/* (v3)
   wait_for_cycle.sh      # deploy pre-apply: wait for no RUNNING cycle (v3)
   migrate_to_s3.py       # one-off: seed the bucket from a pre-v3 checkout (v3)
@@ -298,6 +300,23 @@ revisit.
   due") require a confirmation click. Logic lives in `ags.ui.runs`
   (`build_grid`) and `ags.ui.jobs` (cadence, locking, command builders);
   `ags.ui.runs_page` is rendering only.
+- **Scorecard:** its own page (`ui/scorecard_page.py`, also `scripts/run_scorecard.py`), scoring the
+  official coordinator calls from the local mirror with no model call and no write
+  (`ags/scoring.py`). Each call is entered at its `price_at_call` and exited at the 1st (1-day) or 5th
+  (1-week) daily close counting from its own day, so a call is scored only once that close is in the mirror;
+  the page warns when `data/ctrader/daily_bars/` lags the newest log, and has the same "Pull latest data" button (S3 sync, then `scripts/fetch_candles.py`, which asks cTrader for the daily candles the cycles never requested and caches them under `data/` only, market data and never S3) and job banner as the Dashboard. Baselines on the same rows: always
+  long, always short, the medium-trend rule (as the auditor's `trend_benchmark`), plus the coordinator
+  (bullish +1, bearish -1, neutral 0). A candle file is named by cTrader's stamp, the evening before its session, so closes are dated `_session_date(stamp)` as `get_prices` does. Returns are raw or market-neutral (minus the mean return of the calls in
+  the same cycle, needing at least 4). Each commodity counts once per ISO week of the call (its calls that week share a
+  weight of 1; a week with fewer than the 10 scheduled calls, such as a one-off dev run or the week in progress,
+  is worth its share), so the effective count is commodity-weeks and effective weeks are the calendar weeks of
+  evidence. "Since" defaults to `scoring.REVIEW_START`, 2026-10-13, the first scheduled-cycle day, until the
+  owner's clean start date replaces it;
+  intervals are bootstrapped over the same (commodity, ISO week) clusters. Cuts: by week,
+  commodity, code/prompt version (`pipeline`/`version` event; older runs "unversioned"), stated conviction (directional calls only; scoring itself ignores conviction, every call is a full position) and bullish/bearish. The
+  pass bar is `scoring.PASS_BAR`, fixed in code: at 1 week, market-neutral, the coordinator beats the trend
+  rule with the 90% interval of the difference above zero, over at least 8 effective weeks (effective calls / 7),
+  at least 2 of which the basket did not fall; until the sample is that large the verdict is "not yet testable".
 - **Dashboard:** the app's default page; the runs grid and chat stay as they were. It charts the
   paper books over time from the local mirror (`portfolio/{manager,shadow}/cycles/`, `logs/`,
   `attempts/`), on a UTC axis with All / 30d / 7d ranges: equity for both books with the
@@ -309,7 +328,7 @@ revisit.
   and commission are not in it); and LLM spend per UTC day (only days with a cost), stacked by commodity or agent, with the running
   total as a line on a right-hand axis over the selected range (`notify.spend.daily_spend`; retried
   attempts included, unpriced calls left out). "Pull latest data" runs
-  `scripts/sync_local.sh portfolio logs attempts` through the same one-job runner. It is read-only
+  `scripts/sync_local.sh portfolio logs attempts data`, then `scripts/fetch_candles.py`, through the same one-job runner. It is read-only
   and local like the rest of the app. Logic is in `ags.ui.dashboard` (pure pandas frames);
   `ags.ui.dashboard_page` is rendering only.
 

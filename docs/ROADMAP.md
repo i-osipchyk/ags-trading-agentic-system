@@ -101,6 +101,11 @@ cycle saw.
    there; the local mirror only had 7 dev ones) and report effective counts with these
    baselines: always-short, always-long, a mechanical trend rule, and a market-neutral view
    that removes the market's drift. Set the pass bar in advance (see Open decisions).
+   *Built:* `ags/scoring.py`, the UI's Scorecard page and `scripts/run_scorecard.py` (`ARCHITECTURE.md`
+   § Trigger and UI). It scores from the logged calls and closes, not the audit files. The pass bar is
+   the proposal below, set in code but **not yet confirmed by the owner**. The numbers differ from § 1
+   (weighted by effective count, a market-neutral view, and the exit counted from the call day's own
+   close), so § 1's table is not reproduced by it.
 6. **Store the raw Tavily response** next to the filtered one, with the fetch time.
    *Done:* `tavily/search_raw/` (`ARCHITECTURE.md` § External data sources).
 

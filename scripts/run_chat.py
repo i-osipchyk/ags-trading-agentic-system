@@ -15,6 +15,7 @@ from ags.llm.client import LLMClient
 from ags.ui.dashboard_page import render_dashboard_page
 from ags.ui.jobs import JobRunning, start_job, sync_commands
 from ags.ui.runs_page import render_runs_page
+from ags.ui.scorecard_page import render_scorecard_page
 from ags.ui.streamlit_app import render_chat_page
 
 _ROOT = Path(__file__).resolve().parents[1]  # repo root
@@ -35,14 +36,19 @@ def _run_detail() -> None:
     render_chat_page(log_dir=_ROOT / "logs", chat_client=chat_client, model=model)
 
 
-def _dashboard() -> None:
-    def pull() -> None:
-        try:
-            start_job(_ROOT / "jobs", sync_commands(), label="Pull latest data", now=datetime.now(timezone.utc))
-        except JobRunning as exc:
-            st.warning(f"A job is already running: {exc}")
+def _pull() -> None:
+    try:
+        start_job(_ROOT / "jobs", sync_commands(), label="Pull latest data", now=datetime.now(timezone.utc))
+    except JobRunning as exc:
+        st.warning(f"A job is already running: {exc}")
 
-    render_dashboard_page(root=_ROOT, jobs_dir=_ROOT / "jobs", pull=pull)
+
+def _scorecard() -> None:
+    render_scorecard_page(log_dir=_ROOT / "logs", data_dir=_ROOT / "data", jobs_dir=_ROOT / "jobs", pull=_pull)
+
+
+def _dashboard() -> None:
+    render_dashboard_page(root=_ROOT, jobs_dir=_ROOT / "jobs", pull=_pull)
 
 
 st.set_page_config(page_title="Ags", layout="wide")
@@ -50,5 +56,6 @@ _detail = st.Page(_run_detail, title="Run detail", url_path="detail")
 st.navigation([
     st.Page(_dashboard, title="Dashboard", url_path="dashboard", default=True),
     st.Page(_runs, title="Runs", url_path="runs"),
+    st.Page(_scorecard, title="Scorecard", url_path="scorecard"),
     _detail,
 ]).run()
