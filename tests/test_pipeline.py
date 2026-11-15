@@ -589,3 +589,16 @@ def test_a_midday_search_that_found_nothing_falls_back_to_the_carried_morning_ne
 
     assert midday["outputs"]["news"]["carried_forward"] is True
     assert midday["outputs"]["news"]["source_run_id"] == morning["run_id"]
+
+
+def test_the_midday_prompt_offers_the_morning_headlines_and_the_model_may_report_them(tmp_path):
+    morning = _cycle(tmp_path, FIRST, _client_with_headline("Corn rallies"))
+    chat = RoutingChatClient({**_CANNED, "News analyst": _news_reply("Corn rallies")})
+
+    midday = _midday(tmp_path, chat, HeadlineNewsClient("Corn slips at midday"))
+
+    news_call = next(m for m in chat.calls if "News analyst" in m[0]["content"])
+    assert "06:00 ET search already found" in news_call[1]["content"] and "Corn rallies" in news_call[1]["content"]
+    news = midday["outputs"]["news"]
+    assert [h["headline"] for h in news["headlines"]] == ["Corn rallies"]      # traced to the offered list, not dropped
+    assert news["earlier_run_id"] == morning["run_id"] and "dropped_untraceable" not in news

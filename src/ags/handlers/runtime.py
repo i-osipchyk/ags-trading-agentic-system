@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,8 @@ from ags.tools.sources.cot import SocrataCotClient
 from ags.tools.sources.grinds import CocoaGrindsClient
 from ags.tools.sources.grounded_news import GroundedNewsClient
 from ags.tools.sources.news import TavilyNewsClient
+
+logger = logging.getLogger(__name__)
 
 LATE_START_LIMIT = timedelta(hours=1)
 # A slot that was attempted but never reached the book (a held cycle) may be retried this late.
@@ -90,18 +93,30 @@ def lazy(make: Callable[[], object]) -> Callable[[], object]:
     return get
 
 
-def news_client_from(env, config: Config) -> object | None:
-    """Tavily plus Google grounding when NEWS_GROUNDING is "on" (and a Gemini key is set); else None, i.e. Tavily alone."""
+def _grounded_news_client(env) -> GroundedNewsClient | None:
+    """The grounding client when NEWS_GROUNDING is "on" and a Gemini key is set; else None (Tavily alone).
+
+    A missing key must not stop the Lambda starting, so it logs and falls back. `blocking=False`: grounding is an
+    add-on, and its auth or quota failure must never hold a cycle.
+    """
     if (env.get("NEWS_GROUNDING") or "off").strip().lower() != "on":
         return None
-    return CombinedNewsClient(TavilyNewsClient(config), GroundedNewsClient(api_key=env["GEMINI_API_KEY"], blocking=False))
+    if not env.get("GEMINI_API_KEY"):
+        logger.warning("NEWS_GROUNDING is on but GEMINI_API_KEY is not set: news runs on Tavily alone")
+        return None
+    return GroundedNewsClient(api_key=env["GEMINI_API_KEY"], blocking=False)
+
+
+def news_client_from(env, config: Config) -> object | None:
+    """Tavily plus Google grounding for the 06:00 ET search; None, i.e. Tavily alone, when grounding is off."""
+    grounded = _grounded_news_client(env)
+    return CombinedNewsClient(TavilyNewsClient(config), grounded) if grounded else None
 
 
 def midday_news_client_from(env) -> object | None:
-    """Grounding alone for the 12:30 ET cycle when NEWS_GROUNDING is "on"; else None, i.e. carry the morning's news."""
-    if (env.get("NEWS_GROUNDING") or "off").strip().lower() != "on":
-        return None
-    return GroundedNewsOnlyClient(GroundedNewsClient(api_key=env["GEMINI_API_KEY"], blocking=False))
+    """Grounding alone for the 12:30 ET cycle; None, i.e. carry the morning's news, when grounding is off."""
+    grounded = _grounded_news_client(env)
+    return GroundedNewsOnlyClient(grounded) if grounded else None
 
 
 def build_runtime(

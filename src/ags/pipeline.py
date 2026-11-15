@@ -176,14 +176,15 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
         return carry_forward_news(log_dir, commodity=commodity, before=min(as_of, trigger_timestamp))
 
     def _midday_news() -> dict:
-        # Grounding searches the 12:30 cycle (Tavily only the morning's); with it off, or if it came back with
-        # nothing, the morning's output is carried as before.
+        # Grounding searches the 12:30 cycle (Tavily only the morning's), and the morning's headlines go into its
+        # prompt; with grounding off, or if the search came back with nothing, the morning's output is carried as is.
+        carried = _carried()
         if midday_news_client is None:
-            return _carried()
+            return carried
         output = run_news_analyst(
-            data_dir, _client("news"), news_client=midday_news_client, fetch_documents=False, **common
+            data_dir, _client("news"), news_client=midday_news_client, fetch_documents=False, earlier=carried, **common
         )
-        return output if output["headlines"] else _carried()
+        return output if output["headlines"] else carried
 
     analysts = {
         "technical": lambda: run_technical_analyst(
