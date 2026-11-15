@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ags.agents.output import list_of, parse_reply
+from ags.frozen import FrozenInputError, NoFetch, frozen_search
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.storage import Storage, as_storage
 from ags.tools.pit_store import ET
@@ -26,6 +27,18 @@ Respond with a JSON object containing exactly this field:
     "date": the article's publish date (ISO format), copied from the search result
     "direction": "bullish" | "bearish" | "neutral"
     "reason": one-line reason for that direction call
+No other text — JSON only."""
+
+ALIGNED_SYSTEM_PROMPT_TEMPLATE = SYSTEM_PROMPT_TEMPLATE[:SYSTEM_PROMPT_TEMPLATE.index("\n\nRespond with")] + """
+
+Respond with a JSON object containing exactly these fields:
+  "headlines": a deduped list of objects, each with:
+    "headline": the article title, copied exactly as search_news returned it
+    "source": where it's from
+    "date": the article's publish date (ISO format), copied from the search result
+    "direction": "bullish" | "bearish" | "neutral" (for the price of {commodity})
+    "reason": one-line reason for that direction call
+  "invalidation": a list of developments that would turn the direction of this news flow
 No other text — JSON only."""
 
 # Tavily is searched only on the first cycle of the day (06:00 ET, after the overnight news); the
@@ -96,6 +109,7 @@ def carry_forward_news(log_dir: Storage | Path, *, commodity: str, before: datet
         if output is not None and not output.get("carried_forward"):
             return {
                 "headlines": output.get("headlines", []),
+                **({"invalidation": output["invalidation"]} if "invalidation" in output else {}),
                 "degraded": bool(output.get("degraded")),
                 "carried_forward": True,
                 "source_run_id": run_id,
@@ -119,16 +133,30 @@ def run_news_analyst(
     as_of: datetime,
     model: str,
     news_client: NewsClient | None = None,
+    aligned: bool = False,
+    frozen_results: list[dict] | None = None,
 ) -> dict:
+    """`frozen_results`: replay what a cycle was shown (frozen.py). Every search returns those articles, whatever
+    the query, and no search or extraction ever reaches Tavily."""
     seen: list[dict] = []  # every search result the model was shown, to tie its headlines back to
+    served: set[str] = set()  # frozen runs: the articles already handed to the model
 
     # Both raise on a source failure: the loop reports it and asks the model to retry.
     def _search_news_tool(query: str) -> dict:
+        if frozen_results is not None:
+            results = frozen_search(frozen_results, query, served)
+            seen.extend(results)
+            return {"results": results}
         results = fetch_search_news(data_dir, commodity=commodity, query=query, as_of=as_of, client=news_client)
         seen.extend(results)
         return {"results": results}
 
     def _fetch_document_tool(url: str) -> dict:
+        if frozen_results is not None:
+            try:
+                return fetch_document_pit(data_dir, url=url, as_of=as_of, client=NoFetch())
+            except FrozenInputError:
+                return {"unavailable": "this article's text was not stored; judge it from the search result"}
         return fetch_document_pit(data_dir, url=url, as_of=as_of, client=news_client)
 
     tools = [
@@ -154,7 +182,9 @@ def run_news_analyst(
         ),
     ]
 
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(commodity=commodity, as_of=as_of.isoformat())
+    system_prompt = (ALIGNED_SYSTEM_PROMPT_TEMPLATE if aligned else SYSTEM_PROMPT_TEMPLATE).format(
+        commodity=commodity, as_of=as_of.isoformat()
+    )
     user_prompt = f"Find recent news for {commodity} as of {as_of.isoformat()}."
 
     loop_result = run_json_loop(
@@ -165,11 +195,13 @@ def run_news_analyst(
     # tools-disabled final call, it can still emit its own pseudo-tool-call
     # markup as plain content instead of the requested JSON. A malformed
     # final answer degrades the run rather than crashing the pipeline.
-    parsed, complete, unparsed = parse_reply(loop_result.content, {"headlines": list_of(dict)})
+    fields = {"headlines": list_of(dict), **({"invalidation": list_of(str)} if aligned else {})}
+    parsed, complete, unparsed = parse_reply(loop_result.content, fields)
     headlines, dropped = ground_headlines(parsed.get("headlines", []), seen)
 
     return {
         "headlines": headlines,
+        **({"invalidation": parsed["invalidation"]} if "invalidation" in parsed else {}),
         **({"dropped_untraceable": dropped} if dropped else {}),
         **unparsed,
         "degraded": not complete or loop_result.tool_errors > 0,

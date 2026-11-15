@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from ags.agents.output import of, parse_reply
+from ags.alignment import technical_bias
+from ags.agents.output import list_of, of, parse_reply
 from ags.llm.loop import ChatClient, ToolSpec, run_json_loop
 from ags.tools.chart import get_chart_snapshot as compute_chart_snapshot
 from ags.tools.levels import get_key_levels as compute_key_levels
@@ -23,6 +24,11 @@ from ags.tools.trend import get_trend_state as compute_trend_state
 from ags.tools.volatility import get_volatility as compute_volatility
 
 _REPLY_FIELDS = {"seasonality_alignment": of(str), "chart_description": of(str)}
+# The aligned reply (ROADMAP.md Step 1) adds the analyst's one-step adjustment of the mechanical bias, and what
+# would prove the read wrong. Only the aligned prompt asks for them.
+_ALIGNED_REPLY_FIELDS = {
+    **_REPLY_FIELDS, "bias_adjustment": of(int), "adjustment_reason": of(str), "invalidation": list_of(str),
+}
 _DEFAULT_HISTORY_DAYS = 365 * 3
 _DEFAULT_CHART_LOOKBACK_CANDLES = 30
 _MAX_INTRADAY_BARS = 200
@@ -55,6 +61,24 @@ Respond with a JSON object containing exactly these fields:
   "seasonality_alignment": "typical" | "atypical" (with implicit reasoning)
   "chart_description": a short narrative of the recent candle/EMA action and where price sits against the key levels
 No other text — JSON only."""
+
+_ALIGNED_REPLY = """
+
+The trend states above give a mechanical bias for the price of {code_bias} (the scale runs from -2, strongly
+bearish, to +2, strongly bullish). Code computes it and sends it to the coordinator together with your comment.
+You may move it by one step (-1 or +1) only if the chart shows something the three trend states cannot, for
+example a trend that is clearly slowing, or a reversal candle at a key level, and you must name what you see. If
+there is nothing like that, leave it at 0.
+
+Respond with a JSON object containing exactly these fields:
+  "seasonality_alignment": "typical" | "atypical" (with implicit reasoning)
+  "chart_description": a short narrative of the recent candle/EMA action and where price sits against the key levels
+  "bias_adjustment": -1, 0 or 1 (0 unless you can name the specific evidence)
+  "adjustment_reason": the evidence behind a non-zero adjustment, or "" when it is 0
+  "invalidation": a list of what would prove this technical read wrong
+No other text — JSON only."""
+ALIGNED_SYSTEM_PROMPT_TEMPLATE = SYSTEM_PROMPT_TEMPLATE[: SYSTEM_PROMPT_TEMPLATE.index("\n\nRespond with")] + _ALIGNED_REPLY
+
 
 
 def describe_intraday(reference_quote: dict | None, last_bar: dict | None) -> str:
@@ -105,7 +129,10 @@ def run_technical_analyst(
     now: datetime | None = None,
     history_days: int = _DEFAULT_HISTORY_DAYS,
     chart_lookback_candles: int = _DEFAULT_CHART_LOOKBACK_CANDLES,
+    aligned: bool = False,
+    recorded_positioning: dict | None = None,
 ) -> dict:
+    """`recorded_positioning`: the positioning a past cycle was given (frozen.py), used instead of fetching it."""
     degraded = False
     trend = None
     volatility = None
@@ -114,8 +141,8 @@ def run_technical_analyst(
     key_levels = None
     last_bar = None
 
-    positioning = None
-    if cot_client is not None:
+    positioning = recorded_positioning
+    if recorded_positioning is None and cot_client is not None:
         try:
             positioning = fetch_positioning(data_dir, symbol=commodity, as_of=as_of, client=cot_client)
         except Exception:
@@ -215,7 +242,8 @@ def run_technical_analyst(
         ),
     ]
 
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+    system_prompt = (ALIGNED_SYSTEM_PROMPT_TEMPLATE if aligned else SYSTEM_PROMPT_TEMPLATE).format(
+        code_bias=technical_bias(trend)[0] if trend is not None else "unavailable",
         commodity=commodity,
         as_of=as_of.isoformat(),
         trend=json.dumps(trend) if trend is not None else "unavailable",
@@ -236,7 +264,9 @@ def run_technical_analyst(
     )
 
     # A malformed reply only loses the model's fields: trend and volatility were computed by code.
-    parsed, complete, unparsed = parse_reply(loop_result.content, _REPLY_FIELDS)
+    parsed, complete, unparsed = parse_reply(
+        loop_result.content, _ALIGNED_REPLY_FIELDS if aligned else _REPLY_FIELDS
+    )
     degraded = degraded or not complete or loop_result.tool_errors > 0
 
     return {
@@ -246,6 +276,7 @@ def run_technical_analyst(
         "seasonality_alignment": parsed.get("seasonality_alignment"),
         "key_levels": key_levels,
         "chart_description": parsed.get("chart_description"),
+        **({k: parsed[k] for k in ("bias_adjustment", "adjustment_reason", "invalidation") if k in parsed}),
         **unparsed,
         "degraded": degraded,
     }

@@ -44,7 +44,10 @@ def _pull() -> None:
 
 
 def _scorecard() -> None:
-    render_scorecard_page(log_dir=_ROOT / "logs", data_dir=_ROOT / "data", jobs_dir=_ROOT / "jobs", pull=_pull)
+    render_scorecard_page(
+        log_dir=_ROOT / "logs", data_dir=_ROOT / "data", jobs_dir=_ROOT / "jobs", pull=_pull,
+        challenger_root=_ROOT / "replays" / "analysts",
+    )
 
 
 def _dashboard() -> None:

@@ -250,3 +250,97 @@ def test_a_no_trading_marker_is_not_a_bar(dirs):
     (data_dir / "ctrader" / "daily_bars" / "corn" / "2026-10-02.json").write_text('{"date": "2026-10-02", "no_trading": true}')
 
     assert list(scoring.load_closes(data_dir, "corn")) == [1.0, 2.0]
+
+
+# --- challenger vs official ---------------------------------------------------------------------------------
+
+def _rerun_log(folder, run_id, call, biases=None, code_bias=None, version=None):
+    folder.mkdir(parents=True, exist_ok=True)
+    events = []
+    if version:
+        events.append({"agent": "pipeline", "event_type": "version", "payload": version})
+    for analyst, bias in (biases or {}).items():
+        payload = {"bias": bias, **({"code_bias": code_bias} if analyst == "technical" and code_bias is not None else {})}
+        events.append({"agent": analyst, "event_type": "output", "payload": payload})
+    events.append({"agent": "coordinator", "event_type": "output",
+                   "payload": {"call": call, "conviction": 4, "price_at_call": {"price": 100.0}}})
+    (folder / f"{run_id}.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+
+def _official_two(dirs):
+    log_dir, data_dir = dirs
+    _falling_history(data_dir)
+    _log(log_dir, "corn", CALL_TIME, "bullish", 100.0)                           # wrong: it fell 8% in a week
+    _log(log_dir, "corn", CALL_TIME + timedelta(hours=6), "bearish", 100.0)      # right
+    return scoring.build_rows(log_dir, data_dir, horizon_days=5), log_dir
+
+
+def test_the_challenger_is_scored_on_the_official_rows_it_re_made_and_the_rest_are_counted_as_missing(dirs, tmp_path):
+    frame, _ = _official_two(dirs)
+    first = frame.run_id.iloc[0]
+    rerun = tmp_path / "rerun"
+    _rerun_log(rerun, first, "bearish")                                         # the other run was not re-made
+
+    matched, info = scoring.compare_challenger(frame, rerun)
+
+    assert info == {"official": 2, "matched": 1, "missing": 1}
+    row = matched.iloc[0]
+    assert (row["call_official"], row["call"]) == ("bullish", "bearish")
+    assert row["raw_official"] == pytest.approx(-0.08) and row["raw_coordinator"] == pytest.approx(0.08)
+    assert row["ret"] == frame.iloc[0]["ret"]                                    # same prices as the official row
+
+
+def test_the_comparison_says_how_often_the_calls_agree_and_whether_the_challenger_did_better(dirs, tmp_path):
+    frame, _ = _official_two(dirs)
+    rerun = tmp_path / "rerun"
+    _rerun_log(rerun, frame.run_id.iloc[0], "bearish")                          # flipped, and right
+    _rerun_log(rerun, frame.run_id.iloc[1], "neutral")                          # was right, now no call
+
+    matched, _ = scoring.compare_challenger(frame, rerun)
+
+    same = scoring.agreement(matched)
+    assert same["same_call"] == 0 and same["opposite_call"] == 0.5 and same["to_neutral"] == 0.5
+    diff = scoring.challenger_difference(matched, neutral=False)
+    # Run 1: official -8% vs challenger +8%; run 2: official +8% vs challenger 0 (neutral). Equal weights: +4%.
+    assert diff["difference"] == pytest.approx(0.04)
+    summary = scoring.summarize(matched, neutral=False, strategies=scoring.COMPARED).set_index("strategy")
+    assert summary.loc["coordinator", "directional"] == 1 and summary.loc["official", "directional"] == 2
+
+
+def test_the_official_view_swaps_the_official_calls_into_the_coordinator_columns(dirs, tmp_path):
+    frame, _ = _official_two(dirs)
+    rerun = tmp_path / "rerun"
+    for run_id in frame.run_id:
+        _rerun_log(rerun, run_id, "neutral")
+    matched, _ = scoring.compare_challenger(frame, rerun)
+
+    view = scoring.official_view(matched)
+
+    assert list(view["call"]) == ["bullish", "bearish"] and list(view["pos_coordinator"]) == [1, -1]
+    assert scoring.summarize(view, neutral=False).set_index("strategy").loc["coordinator", "directional"] == 2
+
+
+def test_each_analysts_bias_is_scored_as_a_position_and_the_technical_adjustment_is_visible(dirs, tmp_path):
+    frame, _ = _official_two(dirs)
+    rerun = tmp_path / "rerun"
+    for run_id in frame.run_id:
+        # The price fell: technical -1 (adjusted from -2) is right, news +1 is wrong, weather has no view.
+        _rerun_log(rerun, run_id, "bearish", {"technical": -1, "news": 1, "weather": 0, "supply_demand": 2}, code_bias=-2)
+    matched, _ = scoring.compare_challenger(frame, rerun)
+
+    table = scoring.by_analyst(matched, neutral=False).set_index("analyst")
+
+    assert table.loc["technical", "hit_rate"] == 1.0 and table.loc["technical", "mean_return"] > 0
+    assert table.loc["news", "hit_rate"] == 0.0 and table.loc["news", "mean_return"] < 0
+    assert table.loc["weather", "directional"] == 0 and table.loc["weather", "mean_return"] == 0
+    assert "technical (code only)" in table.index
+
+
+def test_the_challengers_version_label_is_taken_from_its_own_log(dirs, tmp_path):
+    frame, _ = _official_two(dirs)
+    rerun = tmp_path / "rerun"
+    _rerun_log(rerun, frame.run_id.iloc[0], "bearish", version={"code_version": "abcdef123", "prompt_hashes": {"all": "999999000000"}})
+
+    matched, _ = scoring.compare_challenger(frame, rerun)
+
+    assert matched["version"].iloc[0] == "abcdef1/999999"

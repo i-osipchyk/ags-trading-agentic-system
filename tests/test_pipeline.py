@@ -558,3 +558,135 @@ def test_supply_demand_is_computed_by_code_without_calling_the_model_and_still_l
     logged = [e for e in _events(tmp_path, result["run_id"]) if e["agent"] == "supply_demand"]
     assert [e["event_type"] for e in logged] == ["output"]
     assert logged[0]["payload"] == expected
+
+
+def test_an_aligned_run_gives_the_coordinator_the_common_envelope_and_logs_that_it_is_aligned(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_SHA", "abc1234")
+    replies = {
+        **_CANNED,
+        "Technical analyst": {**_CANNED["Technical analyst"], "bias_adjustment": 0, "adjustment_reason": "",
+                              "invalidation": []},
+        "News analyst": {"headlines": [], "invalidation": []},
+        "Weather/season analyst": {"regions_covered": [], "current_conditions": {}, "risk_assessment": {},
+                                   "invalidation": []},
+    }
+    chat = RoutingChatClient(replies)
+
+    result = run_pipeline(
+        commodity="corn", as_of=AS_OF, trigger_timestamp=TRIGGER, chat_client=chat, model="stub-model",
+        log_dir=tmp_path / "logs", data_dir=tmp_path / "data", prices_client=FailingPricesClient(),
+        news_client=EmptyNewsClient(), usda_client=FakeUsdaClient(), aligned=True,
+    )
+
+    for analyst, output in result["outputs"].items():
+        assert "bias" in output and "scale" in output, analyst
+    coordinator_prompt = next(m for m in chat.calls if "Coordinator" in m[0]["content"])[1]["content"]
+    assert '"bias"' in coordinator_prompt and '"scale"' in coordinator_prompt
+    version = _events(tmp_path, result["run_id"])[0]["payload"]
+    assert version["aligned"] is True
+    assert version["prompt_hashes"]["weather"] != versioning_live_hashes()["weather"]
+
+
+def versioning_live_hashes():
+    from ags.versioning import prompt_hashes
+
+    return prompt_hashes()
+
+
+def test_a_normal_run_stays_unaligned(tmp_path):
+    result = _run(tmp_path)
+
+    assert all("bias" not in output for output in result["outputs"].values())
+    assert _events(tmp_path, result["run_id"])[0]["payload"]["aligned"] is False
+
+
+class ExplodingNewsClient:
+    def search(self, query, *, published_before):
+        raise AssertionError("a frozen run must not search")
+
+    def extract(self, url):
+        raise AssertionError("a frozen run must not extract")
+
+
+def _frozen(**overrides):
+    from ags.frozen import FrozenInputs
+
+    quote = {"kind": "intraday_quote", "bid": 4.5, "ask": 4.6, "price": 4.55,
+             "quote_timestamp": "2026-06-05T09:59:50+00:00", "captured_at": "2026-06-05T10:00:01+00:00"}
+    article = {"headline": "Frozen article", "source": "example.com", "url": "https://example.com/f",
+               "date": "2026-06-03", "snippet": ""}
+    return FrozenInputs(**{"source_run_id": "corn_official", "news_results": [article], "reference_quote": quote,
+                           "positioning": {"net_pct_oi": 0.46}, **overrides})
+
+
+def test_a_frozen_run_serves_the_news_the_cycle_saw_whatever_the_models_query_and_never_searches(tmp_path):
+    replies = {**_CANNED, "News analyst": _news_reply("Frozen article", "bullish")}
+
+    result = run_pipeline(
+        commodity="corn", as_of=AS_OF, trigger_timestamp=TRIGGER, chat_client=RoutingChatClient(replies),
+        model="stub-model", log_dir=tmp_path / "logs", data_dir=tmp_path / "data", news_client=ExplodingNewsClient(),
+        frozen=_frozen(),
+    )
+
+    headlines = result["outputs"]["news"]["headlines"]
+    assert [h["headline"] for h in headlines] == ["Frozen article"] and headlines[0]["date"] == "2026-06-03"
+    assert result["outputs"]["news"]["degraded"] is False
+
+
+def test_a_frozen_run_uses_the_logged_quote_and_positioning_and_records_where_it_was_frozen_from(tmp_path):
+    chat = RoutingChatClient()
+
+    result = run_pipeline(
+        commodity="corn", as_of=AS_OF, trigger_timestamp=TRIGGER, chat_client=chat, model="stub-model",
+        log_dir=tmp_path / "logs", data_dir=tmp_path / "data", frozen=_frozen(),
+    )
+
+    assert result["call"]["price_at_call"]["kind"] == "intraday_quote"
+    assert result["call"]["price_at_call"]["price"] == 4.55
+    assert result["outputs"]["technical"]["positioning"] == {"net_pct_oi": 0.46}
+    technical_prompt = next(m for m in chat.calls if "Technical analyst" in m[0]["content"])[0]["content"]
+    assert "INTRADAY price" in technical_prompt and "0.46" in technical_prompt
+    assert _events(tmp_path, result["run_id"])[0]["payload"]["frozen_from"] == "corn_official"
+
+
+def test_a_frozen_run_cannot_reach_a_source_that_has_nothing_stored(tmp_path):
+    # Nothing is stored and every client refuses: the analysts degrade, nothing is fetched.
+    result = run_pipeline(
+        commodity="corn", as_of=AS_OF, trigger_timestamp=TRIGGER, chat_client=RoutingChatClient(),
+        model="stub-model", log_dir=tmp_path / "logs", data_dir=tmp_path / "data", frozen=_frozen(),
+    )
+
+    assert result["outputs"]["technical"]["degraded"] is True
+    assert result["outputs"]["supply_demand"]["degraded"] is True
+    assert not (tmp_path / "data" / "ctrader").exists()          # no bar was fetched and cached
+
+
+def test_a_frozen_run_carries_the_news_forward_when_the_cycle_did_whatever_the_current_rule_says(tmp_path):
+    # 06:00 ET would search under today's rule, but the cycle being rerun carried (the old evening-search schedule).
+    chat = RoutingChatClient()
+
+    result = run_pipeline(
+        commodity="corn", as_of=AS_OF, trigger_timestamp=TRIGGER, chat_client=chat, model="stub-model",
+        log_dir=tmp_path / "logs", data_dir=tmp_path / "data", frozen=_frozen(news_fetched=False),
+    )
+
+    assert result["outputs"]["news"]["carried_forward"] is True
+    assert not any("News analyst" in m[0]["content"] for m in chat.calls)
+
+
+def test_a_frozen_cocoa_run_gets_its_supply_demand_from_the_archived_grinds(tmp_path):
+    from ags.tools.pit_store import write_pit
+
+    for region in ("europe", "asia"):      # a missing region marks the output degraded, which is no view
+        write_pit(tmp_path / "data", source="cocoa_grinds", report="quarterly", symbol=region,
+                  release_date=date(2026, 6, 1), content={"region": region, "published": "2026-06-01",
+                                                          "tonnes": 100000 if region == "europe" else None,
+                                                          "yoy_pct": 9.0})
+
+    result = run_pipeline(
+        commodity="cocoa", as_of=AS_OF, trigger_timestamp=TRIGGER, chat_client=RoutingChatClient(),
+        model="stub-model", log_dir=tmp_path / "logs", data_dir=tmp_path / "data", frozen=_frozen(), aligned=True,
+    )
+
+    supply_demand = result["outputs"]["supply_demand"]
+    assert supply_demand["latest_report"]["date"] == "2026-06-01" and supply_demand["bias"] == 2

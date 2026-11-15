@@ -12,6 +12,12 @@ _PROMPTS = {
     "weather": weather.SYSTEM_PROMPT_TEMPLATE,
     "coordinator": coordinator.SYSTEM_PROMPT_TEMPLATE,
 }
+_ALIGNED_PROMPTS = {
+    "technical": technical.ALIGNED_SYSTEM_PROMPT_TEMPLATE,
+    "news": news.ALIGNED_SYSTEM_PROMPT_TEMPLATE,
+    "weather": weather.ALIGNED_SYSTEM_PROMPT_TEMPLATE,
+    "coordinator": coordinator.ALIGNED_SYSTEM_PROMPT_TEMPLATE,
+}
 
 
 def code_version() -> str:
@@ -32,12 +38,16 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
-def prompt_hashes() -> dict[str, str]:
-    """A short hash per agent's system prompt template, plus `all` over the four, so runs can be cut by prompt version."""
-    hashes = {agent: _digest(template) for agent, template in _PROMPTS.items()}
+def prompt_hashes(*, aligned: bool = False) -> dict[str, str]:
+    """A short hash per agent's system prompt template, plus `all` over the four, so runs can be cut by prompt version.
+
+    `aligned` hashes the aligned variants (ROADMAP.md Step 1) of the four prompts.
+    """
+    prompts = {**_PROMPTS, **(_ALIGNED_PROMPTS if aligned else {})}
+    hashes = {agent: _digest(template) for agent, template in prompts.items()}
     hashes["all"] = _digest("".join(hashes[agent] for agent in _PROMPTS))
     return hashes
 
 
-def version_stamp() -> dict:
-    return {"code_version": code_version(), "prompt_hashes": prompt_hashes()}
+def version_stamp(*, aligned: bool = False) -> dict:
+    return {"code_version": code_version(), "prompt_hashes": prompt_hashes(aligned=aligned), "aligned": aligned}

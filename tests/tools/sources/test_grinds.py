@@ -190,3 +190,21 @@ def test_get_grinds_keeps_the_other_regions_when_one_source_fails(tmp_path):
     result = get_grinds(tmp_path, as_of=datetime(2026, 10, 16, 6, 0, tzinfo=ET), client=client)
 
     assert result == {"europe": EUROPE, "asia": None}
+
+
+def test_a_frozen_run_reads_the_archived_grind_release_and_never_fetches(tmp_path):
+    from datetime import date, datetime, timezone
+
+    from ags.tools.pit_store import write_pit
+    from ags.tools.sources.grinds import ArchivedGrindsClient, get_grinds
+
+    release = {"region": "europe", "published": "2026-10-15", "tonnes": 348215, "yoy_pct": 4.8}
+    write_pit(tmp_path, source="cocoa_grinds", report="quarterly", symbol="europe",
+              release_date=date(2026, 10, 15), content=release)
+    as_of = datetime(2026, 11, 13, 16, 0, tzinfo=timezone.utc)
+
+    grinds = get_grinds(tmp_path, as_of=as_of, client=ArchivedGrindsClient(tmp_path))
+
+    assert grinds["europe"] == release and grinds["asia"] is None
+    assert get_grinds(tmp_path, as_of=datetime(2026, 10, 1, tzinfo=timezone.utc),
+                      client=ArchivedGrindsClient(tmp_path))["europe"] is None      # not yet published then

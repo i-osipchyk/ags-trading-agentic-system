@@ -88,6 +88,10 @@ cycle saw.
 
 1. **Freeze the setup and restart the review window from a clean date.** The first month mixes
    the defects above. Choose the date when all of them are deployed and verified.
+   *Decided 2026-11-14:* the review window starts **2026-10-13**, the first day of the scheduled cycles
+   (`scoring.REVIEW_START`). That is earlier than the date the fixes were deployed, so the window still
+   holds runs made with the defects; the scorecard's by-version cut separates them (runs before the
+   version stamp deploys are "unversioned").
 2. **Stamp each cycle** with a code version and a hash of the prompts in the run log.
    *Done:* the `pipeline`/`version` event (`ARCHITECTURE.md` § Logging and replay).
 3. **Alarm on stale data.** Log each source's latest release date and age; flag when it is
@@ -122,6 +126,35 @@ drivers and invalidation conditions, alongside today's evidence fields. Notes:
 - The point is per-analyst scoring and a coordinator that weighs verdicts instead of picking
   the one analyst that happens to give one.
 
+**Decided 2026-11-14 (design for the first build, `ags/alignment.py`):**
+
+- **Common envelope** next to each analyst's evidence fields: `bias`, `code_bias`, `bias_source`
+  (`code` or `code+model`), `scale` (with what each value means), `confidence` 1-5, `horizon`
+  (`days` | `1 week` | `weeks` | `month`), `drivers`, `invalidation`, `basis`, and `context` where relevant.
+- **Scales.** Price biases are -2..+2 (negative = bearish for the price). Weather is -1..+1: it modifies supply
+  rather than giving a trend. Every output carries its scale and the meaning of each value, so the coordinator
+  never has to guess.
+- **Biases are computed in code:** supply/demand from the ending-stocks revision (cocoa: the average grind
+  year on year); technical from the three trend states; news as a recency-weighted roll-up of the headline
+  directions; weather from the model's regional labels (`favourable`, `benign`, `watch`, `severe`) times the
+  crop stage's weight (critical 1, relevant 0.5, off-season 0).
+- **Weather states its stage** and that the stage weighting is already in the number (`context`,
+  `basis`), so the coordinator does not discount it a second time.
+- **Technical sends both.** The coordinator gets the deterministic score and the analyst's comment. The model
+  may move the score one step with a stated reason (`bias` vs `code_bias`, plus `adjustment_reason`), so the
+  scorecard can tell whether its adjustments helped.
+- **Rollout:** the new shape runs as a shadow challenger beside the live pipeline, outside the official record
+  (Principles, § 2), and is compared on the same cycles before it replaces anything.
+- **Built so far:** the envelope and the code biases (`alignment.py`), the analysts' aligned prompts and the
+  merge into their outputs behind `run_pipeline(aligned=True)` (`ARCHITECTURE.md` § Aligned analyst output).
+  The coordinator's aligned prompt and rubric (support and dissent derived from the biases) are built too.
+  The challenger batch runner (`scripts/run_challenger.py`) and the Scorecard's challenger comparison, with
+  per-analyst scoring, are built, and the first batch has been run and read: `docs/results/2026-11-aligned-challenger.md`
+  (no distinguishable difference from the live cycle yet). Still to do: run the challenger on every new cycle and
+  let the weeks accumulate.
+- The thresholds (revision size, headline half-life, stage weights) are first guesses, set in
+  `alignment.py` and to be tuned from the scorecard, not from a single month.
+
 ### Step 2 — evaluate it
 
 1. **Replay on the live archive.** Re-run analysts and coordinator against the stored caches
@@ -129,6 +162,8 @@ drivers and invalidation conditions, alongside today's evidence fields. Notes:
    weeks of one falling market, so it tests mechanics (do biases line up with the call, what
    does each ablation change), not skill. The counterfactual replay (`scripts/run_replay.py`)
    currently re-runs only the coordinator and manager; this extends it to analysts.
+   *Built for one run at a time:* `scripts/replay_analysts.py` reruns an official run's analysts and coordinator
+   on its frozen inputs (`ARCHITECTURE.md` § Frozen inputs). Not yet batched over many cycles.
 2. **Forward champion and challenger.** Run the aligned-prompt version in shadow from a fixed
    date for several weeks and compare on identical cycles. Model cost is small (about $5 for
    the first month), so doubling it is cheap.
@@ -179,7 +214,7 @@ report day. Requirements:
 
 ## 5. Open decisions
 
-- The clean start date for the review window.
+- ~~The clean start date for the review window.~~ Decided: 2026-10-13 (Step 0, item 1).
 - The pass bar. For example: beat the mechanical trend rule market-neutral over at least 8
   effective weeks, including a rising or choppy stretch.
 - The shape and scale of `bias` and `confidence`, and each analyst's horizon.

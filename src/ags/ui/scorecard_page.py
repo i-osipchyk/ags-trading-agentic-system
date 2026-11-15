@@ -24,6 +24,16 @@ def _rows(log_dir: str, data_dir: str, horizon_days: int, since: date | None, mi
     return scoring.build_rows(Path(log_dir), Path(data_dir), horizon_days=horizon_days, since=since)
 
 
+@st.cache_data(ttl=60, show_spinner="Scoring the challenger")
+def _matched(log_dir: str, data_dir: str, horizon_days: int, since: date | None, mirror: tuple, batch: str,
+             batch_stamp: float) -> tuple[pd.DataFrame, dict]:
+    # `batch_stamp` (the newest challenger log's mtime) is only a cache key, so a finished batch is never stale.
+    frame = scoring.build_rows(Path(log_dir), Path(data_dir), horizon_days=horizon_days, since=since)
+    if frame.empty:
+        return pd.DataFrame(), {"official": 0, "matched": 0, "missing": 0}
+    return scoring.compare_challenger(frame, Path(batch) / "logs")
+
+
 def _verdict_panel(week: pd.DataFrame) -> None:
     bar = scoring.PASS_BAR
     result = scoring.evaluate_pass_bar(week)
@@ -90,7 +100,60 @@ def _breakdown_panels(frame: pd.DataFrame, *, neutral: bool) -> None:
     )
 
 
-def render_scorecard_page(*, log_dir: Path, data_dir: Path, jobs_dir: Path, pull: Callable[[], None]) -> None:
+_LABELS = {"coordinator": "challenger", "official": "official (live cycle)"}
+
+
+def _challenger_section(
+    *, log_dir: Path, data_dir: Path, root: Path, horizon: str, since: date | None, mirror: tuple, neutral: bool
+) -> None:
+    st.header("Challenger: aligned analysts")
+    batches = sorted(p for p in Path(root).glob("*") if (p / "logs").is_dir()) if Path(root).is_dir() else []
+    if not batches:
+        st.caption("No challenger runs yet. `uv run python scripts/run_challenger.py` prints the plan and `--run` makes it.")
+        return
+    batch = st.selectbox("Batch", batches, format_func=lambda p: p.name, key="score_batch")
+    stamp = max((f.stat().st_mtime for f in (batch / "logs").glob("*.jsonl")), default=0.0)
+    matched, info = _matched(str(log_dir), str(data_dir), scoring.HORIZONS[horizon], since, mirror, str(batch), stamp)
+    st.caption(
+        f"The challenger re-made {info['matched']} of {info['official']} official runs in range; the {info['missing']} "
+        "missing ones (not run yet, or no call) are left out of both sides, so the two are scored on identical cycles."
+    )
+    if matched.empty:
+        return
+
+    st.subheader(f"Challenger vs the live cycle · {horizon} · {'market-neutral' if neutral else 'raw'}")
+    summary = scoring.summarize(matched, neutral=neutral, strategies=scoring.COMPARED)
+    summary["strategy"] = summary["strategy"].replace(_LABELS)
+    st.dataframe(summary.style.format(_PCT), hide_index=True, width="stretch")
+    diff = scoring.challenger_difference(matched, neutral=neutral)
+    left, right = st.columns(2)
+    if diff["difference"] is not None:
+        low, high = diff["interval"]
+        left.metric("Challenger − official, per call", f"{diff['difference']:+.3%}",
+                    help=f"90% interval {low:+.3%} to {high:+.3%}. An interval that spans zero is not a difference.")
+    same = scoring.agreement(matched)
+    right.metric("Same call as the official run", f"{same['same_call']:.0%}",
+                 help=f"Opposite direction {same['opposite_call']:.0%}; one of the two neutral and the other not "
+                      f"{same['neutral_in_one']:.0%}.")
+
+    st.markdown("**Each analyst's bias, scored as a position**")
+    st.dataframe(
+        scoring.by_analyst(matched, neutral=neutral).style.format(
+            {"hit_rate": "{:.0%}", "mean_return": "{:.2%}", "effective": "{:.1f}"}),
+        hide_index=True, width="stretch",
+    )
+    st.caption("Position = the sign of the bias (0 is no view). \"technical (code only)\" is the mechanical score the "
+               "model started from, so the difference to the technical row is what its adjustments did.")
+
+    week, _ = _matched(str(log_dir), str(data_dir), scoring.VERDICT_HORIZON, since, mirror, str(batch), stamp)
+    if not week.empty:
+        st.markdown("**Challenger against the pass bar (1 week, market-neutral, matched cycles)**")
+        _verdict_panel(week)
+
+
+def render_scorecard_page(
+    *, log_dir: Path, data_dir: Path, jobs_dir: Path, pull: Callable[[], None], challenger_root: Path | None = None
+) -> None:
     st.title("Scorecard")
     st.caption(
         "The official coordinator calls, scored from the local mirror against mechanical baselines. "
@@ -138,3 +201,8 @@ def render_scorecard_page(*, log_dir: Path, data_dir: Path, jobs_dir: Path, pull
     st.caption(f"{len(frame)} scored calls from {frame['triggered_at'].min():%Y-%m-%d} to {frame['triggered_at'].max():%Y-%m-%d}.")
     _summary_panel(frame, neutral=neutral)
     _breakdown_panels(frame, neutral=neutral)
+    if challenger_root is not None:
+        _challenger_section(
+            log_dir=log_dir, data_dir=data_dir, root=challenger_root, horizon=horizon, since=since, mirror=mirror,
+            neutral=neutral,
+        )

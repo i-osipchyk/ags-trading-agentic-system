@@ -137,7 +137,8 @@ def test_get_weather_summarises_open_meteo_history_and_forecast_for_a_non_us_reg
 
     monkeypatch.setattr(weather.requests, "get", fake_get)
 
-    result = get_weather(tmp_path, region="BR-MG", as_of=datetime(2026, 10, 30, 10, 0, tzinfo=ET))
+    as_of = datetime(2026, 10, 30, 10, 0, tzinfo=ET)
+    result = get_weather(tmp_path, region="BR-MG", as_of=as_of, now=as_of)       # a live cycle
 
     assert result["forecast"] == {
         "issued": "2026-10-30",
@@ -157,12 +158,28 @@ def test_get_weather_refetches_open_meteo_every_cycle_and_archives_each_pull(tmp
 
     monkeypatch.setattr(weather.requests, "get", fake_get)
 
-    morning = get_weather(tmp_path, region="BR-MG", as_of=datetime(2026, 10, 30, 6, 0, tzinfo=ET))
-    midday = get_weather(tmp_path, region="BR-MG", as_of=datetime(2026, 10, 30, 12, 30, tzinfo=ET))
+    at_0600, at_1230 = datetime(2026, 10, 30, 6, 0, tzinfo=ET), datetime(2026, 10, 30, 12, 30, tzinfo=ET)
+    morning = get_weather(tmp_path, region="BR-MG", as_of=at_0600, now=at_0600)
+    midday = get_weather(tmp_path, region="BR-MG", as_of=at_1230, now=at_1230)
 
     assert len(requests_made) == 2  # a forecast cached at 06:00 would be stale at 12:30
     archived = sorted((tmp_path / "open_meteo" / "forecast" / "BR-MG").glob("*.json"))
     assert [json.loads(path.read_text()) for path in archived] == [morning["forecast"], midday["forecast"]]
+
+
+def test_a_replayed_as_of_reads_the_archived_forecast_and_never_fetches_one(tmp_path, monkeypatch):
+    requests_made = []
+    monkeypatch.setattr(weather.requests, "get", lambda url, **kw: requests_made.append(url) or _OpenMeteoResponse(_open_meteo_payload()))
+    as_of = datetime(2026, 10, 30, 6, 0, tzinfo=ET)
+    live = get_weather(tmp_path, region="BR-MG", as_of=as_of, now=as_of)
+    requests_made.clear()
+
+    replayed = get_weather(tmp_path, region="BR-MG", as_of=as_of, now=datetime(2026, 11, 14, tzinfo=ET))
+    never_archived = get_weather(tmp_path, region="BR-ES", as_of=as_of, now=datetime(2026, 11, 14, tzinfo=ET))
+
+    assert replayed["forecast"] == live["forecast"]
+    assert never_archived["forecast"] is None          # today's forecast would not be what the cycle saw
+    assert requests_made == []
 
 
 @pytest.mark.parametrize("commodity", ["coffee", "cocoa", "sugar", "cotton"])
@@ -172,7 +189,8 @@ def test_every_region_a_commodity_is_offered_can_be_fetched(tmp_path, monkeypatc
 
     for region in weather.regions_for(commodity):
         client = us_client if region in weather.SUPPORTED_REGIONS else None
-        result = get_weather(tmp_path, region=region, as_of=datetime(2026, 10, 30, 10, 0, tzinfo=ET), client=client)
+        as_of = datetime(2026, 10, 30, 10, 0, tzinfo=ET)
+        result = get_weather(tmp_path, region=region, as_of=as_of, client=client, now=as_of)
         assert result["region"] == region
 
 

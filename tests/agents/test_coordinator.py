@@ -254,3 +254,64 @@ def test_an_analysts_unparsed_reply_reaches_the_coordinator():
 
     assert "UNPARSED-MARKER" in client.calls[0]["messages"][1]["content"]
     assert "unparsed_reply" in client.calls[0]["messages"][0]["content"]
+
+
+# --- aligned runs (ROADMAP.md Step 1) ---------------------------------------------------------------------
+
+def _biased(technical=-2, news=-2, weather=1, supply_demand=2, **overrides):
+    outputs = {name: {"bias": bias, "degraded": False}
+               for name, bias in (("technical", technical), ("news", news), ("weather", weather),
+                                  ("supply_demand", supply_demand))}
+    return {**outputs, **overrides}
+
+
+ALIGNED_REPLY = {
+    "call": "bearish", "conviction": 3, "thesis": "Trend and news point down.",
+    "key_drivers": [{"driver": "trend", "source": "technical"}], "invalidation_conditions": ["a close above 4.6"],
+}
+
+
+def test_who_supports_a_call_comes_from_the_signs_of_the_biases_not_from_the_model():
+    from ags.agents.coordinator import derive_support
+
+    outputs = _biased(technical=-2, news=-1, weather=1, supply_demand=0)
+
+    assert derive_support("bearish", outputs) == (["technical", "news"], ["weather"])    # s/d has no view
+    assert derive_support("bullish", outputs) == (["weather"], ["technical", "news"])
+    assert derive_support("neutral", outputs) == (["supply_demand"], ["technical", "news", "weather"])
+
+
+def test_a_crashed_or_biasless_analyst_takes_no_side():
+    from ags.agents.coordinator import derive_support
+
+    outputs = _biased(technical=-2, news=-2, weather=-1, supply_demand=-2)
+    outputs["weather"] = {"error": "ValueError: boom", "degraded": True, "bias": -1}
+    outputs["news"] = {"headlines": [], "degraded": False}
+
+    assert derive_support("bearish", outputs) == (["technical", "supply_demand"], [])
+
+
+def test_an_aligned_run_sends_the_envelope_prompt_and_returns_derived_support():
+    result, client = _call(ALIGNED_REPLY, _biased(), aligned=True)
+
+    system = client.calls[0]["messages"][0]["content"]
+    assert "weather runs -1..+1" in system and "do not discount it for the stage again" in system
+    assert "do not list them yourself" in system
+    assert '"supporting_analysts"' not in system.split("Respond with")[1]
+    assert (result["supporting_analysts"], result["dissenting_analysts"]) == (["technical", "news"], ["weather", "supply_demand"])
+    assert result["call"] == "bearish" and result["conviction"] == 3 and result["degraded"] is False
+
+
+def test_the_aligned_rubric_checks_conviction_against_the_derived_support():
+    # Two of four analysts support a bearish call, so a conviction of 5 breaks the rubric and is capped.
+    result, _ = _call({**ALIGNED_REPLY, "conviction": 5}, _biased(), aligned=True)
+
+    assert result["conviction"] == 3 and result["conviction_as_proposed"] == 5
+    assert result["rubric_violations"]
+
+
+def test_the_live_coordinator_still_asks_for_and_trusts_the_models_lists():
+    result, client = _call(FULL_AGREEMENT)
+
+    assert '"supporting_analysts"' in client.calls[0]["messages"][0]["content"]
+    assert result["supporting_analysts"] == FULL_AGREEMENT["supporting_analysts"]

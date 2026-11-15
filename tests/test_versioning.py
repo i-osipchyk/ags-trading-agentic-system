@@ -39,3 +39,11 @@ def test_every_cycle_logs_its_code_version_and_prompt_hashes_first(tmp_path, mon
     assert (first["agent"], first["event_type"]) == ("pipeline", "version")
     assert first["payload"]["code_version"] == "abc1234"
     assert first["payload"]["prompt_hashes"] == versioning.prompt_hashes()
+
+
+def test_every_aligned_prompt_hashes_differently_from_the_live_one():
+    live, aligned = versioning.prompt_hashes(), versioning.prompt_hashes(aligned=True)
+
+    for agent in ("technical", "news", "weather", "coordinator"):
+        assert live[agent] != aligned[agent]
+    assert live["all"] != aligned["all"]

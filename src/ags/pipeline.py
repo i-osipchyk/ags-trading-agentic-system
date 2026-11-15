@@ -4,17 +4,20 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ags.agents.aligned import align_outputs
 from ags.agents.coordinator import run_coordinator
 from ags.agents.news import carry_forward_news, fetches_news, run_news_analyst
 from ags.agents.technical import run_technical_analyst
 from ags.agents.weather import run_weather_analyst
 from ags.freshness import source_freshness
+from ags.frozen import FrozenInputs, NoFetch
 from ags.llm.client import bind, trace
 from ags.llm.loop import ChatClient
 from ags.logging.run_id import generate_run_id
 from ags.logging.run_log import RunLog
 from ags.storage import LocalStorage, as_storage
 from ags.tools.pit_store import ET
+from ags.tools.sources.grinds import ArchivedGrindsClient
 from ags.tools.sources.prices import LIVE_CYCLE_MAX_AGE, get_prices, get_quote
 from ags.tools.sources.usda import EsmisClient
 from ags.tools.supply_demand import compute_supply_demand
@@ -144,7 +147,15 @@ def run_pipeline(
     grinds_client=None,
     replace_log: bool = False,
     now: datetime | None = None,
+    aligned: bool = False,
+    frozen: FrozenInputs | None = None,
+    track_record_dir=None,
 ) -> dict:
+    """`frozen`: rerun a past cycle on exactly what it saw, fetching nothing (frozen.py).
+
+    `track_record_dir`: where the coordinator reads its past calls, when that is not `log_dir`. A rerun reads the
+    official logs there, so the calls it reviews are the ones the audits graded.
+    """
     now = now or datetime.now(timezone.utc)
     run_id = generate_run_id(commodity, trigger_timestamp)
     log_store = as_storage(log_dir)
@@ -155,16 +166,30 @@ def run_pipeline(
     try:
         with trace(chat_client, run_id):
             return _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
-                        log_store, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, cot_client, grinds_client, now)
+                        log_store, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, cot_client, grinds_client, now,
+                        aligned, frozen, track_record_dir)
     finally:
         raw_log.close()
 
 
 def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
-         log_dir, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, cot_client, grinds_client, now) -> dict:
-    reference = _reference_quote(data_dir, commodity, as_of, prices_client, now)
+         log_dir, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, cot_client, grinds_client, now, aligned=False, frozen=None, track_record_dir=None) -> dict:
+    if frozen is not None:
+        # Anything not already stored fails loudly, never fetched: what is public today is not what the cycle saw.
+        prices_client, weather_client, usda_client = (
+            c if c is not None else NoFetch() for c in (prices_client, weather_client, usda_client)
+        )
+        # Grinds are refetched on every call and archived as first published, so a frozen run reads the archive.
+        grinds_client = grinds_client if grinds_client is not None else ArchivedGrindsClient(data_dir)
+        cot_client = None
+        reference = frozen.reference_quote
+    else:
+        reference = _reference_quote(data_dir, commodity, as_of, prices_client, now)
     run_log = _SharedRunLog(raw_log)
-    run_log.append(agent="pipeline", event_type="version", payload={**version_stamp(), "model": model})
+    run_log.append(agent="pipeline", event_type="version", payload={
+        **version_stamp(aligned=aligned), "model": model,
+        **({"frozen_from": frozen.source_run_id} if frozen is not None else {}),
+    })
     common = {"commodity": commodity, "as_of": as_of, "model": model}
 
     def _client(agent: str) -> LoggingChatClient:
@@ -173,16 +198,20 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
     analysts = {
         "technical": lambda: run_technical_analyst(
             data_dir, _client("technical"), prices_client=prices_client, cot_client=cot_client,
-            reference_quote=reference, now=now, **common
+            reference_quote=reference, now=now, aligned=aligned,
+            recorded_positioning=frozen.positioning if frozen is not None else None, **common
         ),
         "news": (
-            (lambda: run_news_analyst(data_dir, _client("news"), news_client=news_client, **common))
-            if fetches_news(as_of)
+            (lambda: run_news_analyst(
+                data_dir, _client("news"), news_client=news_client, aligned=aligned,
+                frozen_results=frozen.news_results if frozen is not None else None, **common,
+            ))
+            if (frozen.news_fetched if frozen is not None and frozen.news_fetched is not None else fetches_news(as_of))
             # Bounded by both: a local run's trigger is wall-clock time, which can be after as_of.
             else lambda: carry_forward_news(log_dir, commodity=commodity, before=min(as_of, trigger_timestamp))
         ),
         "weather": lambda: run_weather_analyst(
-            data_dir, _client("weather"), weather_client=weather_client, **common
+            data_dir, _client("weather"), weather_client=weather_client, aligned=aligned, now=now, **common
         ),
         # Computed by code from the official releases, so it makes no model call and has no prompt to log.
         "supply_demand": lambda: compute_supply_demand(
@@ -204,6 +233,8 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
         return await asyncio.gather(*(asyncio.to_thread(_guarded, fn) for fn in analysts.values()))
 
     outputs = dict(zip(analysts, asyncio.run(_fan_out())))
+    if aligned:
+        outputs = align_outputs(outputs, as_of=as_of)
     for agent, output in outputs.items():
         run_log.append(agent=agent, event_type="output", payload=output)
     freshness = source_freshness(data_dir, commodity=commodity, as_of=as_of, outputs=outputs)
@@ -214,7 +245,8 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
         # Coordinator-only, and bounded by this run's own trigger so the
         # current run (and anything later) never appears in its own record.
         track_record = lambda lookback_weeks: read_track_record(  # noqa: E731
-            log_dir, audit_dir, commodity=commodity, lookback_weeks=lookback_weeks, as_of=trigger_timestamp
+            log_dir if track_record_dir is None else track_record_dir, audit_dir,
+            commodity=commodity, lookback_weeks=lookback_weeks, as_of=trigger_timestamp,
         )
 
     try:
@@ -226,6 +258,7 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
             analyst_outputs=outputs,
             price_at_call=_price_at_call(data_dir, commodity, as_of, prices_client, reference),
             track_record=track_record,
+            aligned=aligned,
         )
     except Exception as exc:
         call = {"call": None, "degraded": True, "error": f"{type(exc).__name__}: {exc}"}

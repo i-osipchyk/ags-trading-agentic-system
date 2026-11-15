@@ -37,8 +37,9 @@ from ags.tools.trend import get_trend_state
 STRATEGIES = ("coordinator", "always_long", "always_short", "trend")
 COMMODITIES = ("corn", "soybeans", "wheat", "sugar", "coffee", "cotton", "cocoa")
 HORIZONS = {"1 day": 1, "1 week": 5}
-# The first day of the scheduled twice-daily cycles; the earlier runs were dev runs and a changing schedule
-# (ROADMAP.md § 1). Replace it with the owner's clean start date once chosen (Step 0, item 1).
+# The review window's start, confirmed by the owner (ROADMAP.md Step 0, item 1): the first day of the scheduled
+# cycles; the earlier runs were dev runs. Later runs that predate the fixes in ROADMAP.md § 1 are still in the
+# window, and show as "unversioned" in the by-version cut.
 REVIEW_START = date(2026, 10, 13)
 EXPECTED_CALLS_PER_WEEK = 10
 VERDICT_HORIZON = 5
@@ -188,7 +189,7 @@ def bootstrap_interval(
     return float(np.percentile(means, tail)), float(np.percentile(means, 100 - tail))
 
 
-def summarize(frame: pd.DataFrame, *, neutral: bool) -> pd.DataFrame:
+def summarize(frame: pd.DataFrame, *, neutral: bool, strategies: tuple[str, ...] = STRATEGIES) -> pd.DataFrame:
     """One row per strategy: calls scored, effective count, weighted hit rate and mean return with its interval.
 
     The hit rate counts only calls that took a side; the mean return counts all of them (a neutral call earns 0),
@@ -199,7 +200,7 @@ def summarize(frame: pd.DataFrame, *, neutral: bool) -> pd.DataFrame:
     if use.empty:
         return pd.DataFrame(columns=columns)
     out = []
-    for strategy in STRATEGIES:
+    for strategy in strategies:
         returns = use[f"{_kind(neutral)}_{strategy}"]
         taking_a_side = use[use[f"pos_{strategy}"] != 0]
         hits = (taking_a_side[f"{_kind(neutral)}_{strategy}"] > 0).astype(float)
@@ -288,3 +289,115 @@ def evaluate_pass_bar(frame: pd.DataFrame, bar: PassBar = PASS_BAR) -> dict:
             reasons.append("the interval of the difference to the trend rule includes zero or below")
     return {"verdict": verdict, "effective_weeks": effective_weeks, "non_falling_weeks": non_falling,
             "difference": difference, "interval": interval, "reasons": reasons}
+
+
+# --- challenger vs the official calls (ROADMAP.md Step 1) -------------------------------------------------------
+
+ANALYSTS = ("technical", "news", "weather", "supply_demand")
+COMPARED = ("coordinator", "official", "always_long", "always_short", "trend")
+
+
+def _challenger_run(path: Path) -> dict | None:
+    """What a challenger rerun's log says: its call, conviction, version and each analyst's bias."""
+    events = [json.loads(line) for line in path.read_text().splitlines() if line]
+    call = _logged_call(path)
+    if call is None:
+        return None
+    outputs = {}
+    for event in events:
+        if event["event_type"] == "output" and event["agent"] in ANALYSTS:
+            outputs[event["agent"]] = event["payload"]
+    biases = {f"bias_{a}": outputs.get(a, {}).get("bias") for a in ANALYSTS}
+    return {**call, **biases, "code_bias_technical": outputs.get("technical", {}).get("code_bias")}
+
+
+def compare_challenger(frame: pd.DataFrame, challenger_logs: Path) -> tuple[pd.DataFrame, dict]:
+    """The official rows that the challenger also re-made, with its calls beside the official ones.
+
+    Everything else (entry, exit, baselines, basket) is the official row's, so the two are scored on the identical
+    cycles and prices. In the returned frame `coordinator` is the challenger's call and `official` the logged one;
+    each analyst's bias is in `bias_<analyst>` (and the technical analyst's mechanical one in `code_bias_technical`).
+    Returns that frame and {"official": n, "matched": n, "missing": n}.
+    """
+    rows = []
+    for _, row in frame.iterrows():
+        path = Path(challenger_logs) / f"{row['run_id']}.jsonl"
+        rerun = _challenger_run(path) if path.exists() else None
+        if rerun is not None:
+            rows.append({**row.to_dict(), "pos_official": row["pos_coordinator"], "call_official": row["call"],
+                         "conviction_official": row["conviction"], "call": rerun["call"],
+                         "conviction": rerun["conviction"], "version": rerun["version"],
+                         "pos_coordinator": {"bullish": 1, "bearish": -1, "neutral": 0}[rerun["call"]],
+                         **{k: v for k, v in rerun.items() if k.startswith(("bias_", "code_bias_"))}})
+    info = {"official": len(frame), "matched": len(rows), "missing": len(frame) - len(rows)}
+    if not rows:
+        return pd.DataFrame(), info
+    matched = pd.DataFrame(rows)
+    in_week = matched.groupby(["commodity", "week"])["ret"].transform("size")
+    matched["weight"] = 1 / in_week.clip(lower=EXPECTED_CALLS_PER_WEEK)
+    for strategy in ("coordinator", "official"):
+        matched[f"raw_{strategy}"] = matched[f"pos_{strategy}"] * matched["ret"]
+        matched[f"neutral_{strategy}"] = matched[f"pos_{strategy}"] * (matched["ret"] - matched["basket"])
+    return matched, info
+
+
+def agreement(matched: pd.DataFrame) -> dict:
+    """How often the challenger made the same call as the official run, and how it differed when it did not."""
+    if matched.empty:
+        return {}
+    same = matched["pos_coordinator"] == matched["pos_official"]
+    flip = matched["pos_coordinator"] * matched["pos_official"] == -1
+    return {
+        "same_call": float(same.mean()), "opposite_call": float(flip.mean()),
+        "neutral_in_one": float((~same & ~flip).mean()),
+        "to_neutral": float(((matched["pos_coordinator"] == 0) & (matched["pos_official"] != 0)).mean()),
+        "from_neutral": float(((matched["pos_coordinator"] != 0) & (matched["pos_official"] == 0)).mean()),
+    }
+
+
+def challenger_difference(matched: pd.DataFrame, *, neutral: bool) -> dict:
+    """Challenger minus official, weighted mean return per call, with its bootstrap interval."""
+    use = _usable(matched, neutral)
+    if use.empty:
+        return {"difference": None, "interval": None}
+    diff = use[f"{_kind(neutral)}_coordinator"] - use[f"{_kind(neutral)}_official"]
+    return {"difference": _weighted_mean(diff, use["weight"]), "interval": bootstrap_interval(use, diff)}
+
+
+def by_analyst(matched: pd.DataFrame, *, neutral: bool) -> pd.DataFrame:
+    """Each analyst's bias scored as a position (the sign of its bias) against the same returns.
+
+    The technical analyst appears twice: its final bias, and the mechanical `code_bias` it started from, so the
+    effect of the model's one-step adjustments is visible. A bias of 0 is no view: it counts as a call, earns 0, and
+    is left out of the hit rate.
+    """
+    use = _usable(matched, neutral)
+    columns = ["analyst", "calls", "effective", "directional", "hit_rate", "mean_return"]
+    series = {**{a: f"bias_{a}" for a in ANALYSTS}, "technical (code only)": "code_bias_technical"}
+    out = []
+    for name, column in series.items():
+        if column not in use:
+            continue
+        group = use[use[column].notna()]
+        if group.empty:
+            continue
+        position = group[column].apply(lambda b: (b > 0) - (b < 0))
+        returns = position * (group["ret"] - group["basket"] if neutral else group["ret"])
+        directional = position != 0
+        out.append({
+            "analyst": name, "calls": len(group), "effective": float(group["weight"].sum()),
+            "directional": int(directional.sum()),
+            "hit_rate": _weighted_mean((returns[directional] > 0).astype(float), group.loc[directional, "weight"])
+            if directional.any() else float("nan"),
+            "mean_return": _weighted_mean(returns, group["weight"]),
+        })
+    return pd.DataFrame(out, columns=columns)
+
+
+def official_view(matched: pd.DataFrame) -> pd.DataFrame:
+    """The matched rows with the official calls in the `coordinator` columns, to score them with the same code."""
+    view = matched.copy()
+    for column in ("pos", "raw", "neutral"):
+        view[f"{column}_coordinator"] = matched[f"{column}_official"]
+    view["call"], view["conviction"] = matched["call_official"], matched["conviction_official"]
+    return view

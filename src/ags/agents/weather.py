@@ -26,6 +26,32 @@ No other text — JSON only."""
 
 
 _REPLY_FIELDS = {"regions_covered": list_of(str), "current_conditions": of(dict), "risk_assessment": of(dict)}
+_ALIGNED_REPLY_FIELDS = {**_REPLY_FIELDS, "invalidation": list_of(str)}
+
+# The aligned variant (ROADMAP.md Step 1) has the model label the conditions themselves, from "favourable" to
+# "severe". Code then weighs the crop stage and turns the labels into a -1..+1 price bias (alignment.py), so the
+# model must not discount for the stage itself: that would count it twice.
+ALIGNED_SYSTEM_PROMPT_TEMPLATE = """You are the Weather/season analyst for {commodity} futures.
+
+Use the get_weather tool to check conditions for the growing regions you judge most relevant to {commodity}
+(supported regions: {supported_regions}). Label each region's conditions as they are, against what is normal for
+the time of year:
+  "favourable": better than normal for the crop (ample moisture, mild temperatures, no stress)
+  "benign": normal, with no meaningful effect on the crop
+  "watch": an emerging threat to the crop (drying out, heat, frost risk, too much rain)
+  "severe": conditions already damaging the crop, or a clear and imminent threat
+
+Known fact as of {as_of} (computed, not your judgment call):
+  stage_of_crop_cycle: {stage_of_crop_cycle}
+Code weighs this stage after your labels: weather matters a lot while the crop is flowering and not at all while
+it is dormant. So do not soften a label because of the stage; label the conditions as they are.
+
+Respond with a JSON object containing exactly these fields:
+  "regions_covered": list of region codes you assessed
+  "current_conditions": object mapping each region to a short description of observed conditions
+  "risk_assessment": object mapping each region to "favourable" | "benign" | "watch" | "severe"
+  "invalidation": a list of weather developments that would change this assessment
+No other text — JSON only."""
 
 
 def run_weather_analyst(
@@ -36,6 +62,8 @@ def run_weather_analyst(
     as_of: datetime,
     model: str,
     weather_client: WeatherClient | None = None,
+    aligned: bool = False,
+    now: datetime | None = None,
 ) -> dict:
     degraded = False
     stage_of_crop_cycle = compute_growing_calendar(commodity, as_of)["stage"]
@@ -46,7 +74,7 @@ def run_weather_analyst(
         nonlocal degraded
         if region not in regions_for(commodity):
             raise ValueError(f"region {region!r} is not one of {commodity}'s regions: {', '.join(regions_for(commodity))}")
-        result = fetch_weather(data_dir, region=region, as_of=as_of, client=weather_client)
+        result = fetch_weather(data_dir, region=region, as_of=as_of, client=weather_client, now=now)
         if all(result.get(part) is None for part in ("drought", "outlook", "forecast")):
             degraded = True
         return result
@@ -64,7 +92,7 @@ def run_weather_analyst(
         ),
     ]
 
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+    system_prompt = (ALIGNED_SYSTEM_PROMPT_TEMPLATE if aligned else SYSTEM_PROMPT_TEMPLATE).format(
         commodity=commodity,
         as_of=as_of.isoformat(),
         stage_of_crop_cycle=stage_of_crop_cycle,
@@ -76,13 +104,16 @@ def run_weather_analyst(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
     )
 
-    parsed, complete, unparsed = parse_reply(loop_result.content, _REPLY_FIELDS)
+    parsed, complete, unparsed = parse_reply(
+        loop_result.content, _ALIGNED_REPLY_FIELDS if aligned else _REPLY_FIELDS
+    )
 
     return {
         "regions_covered": parsed.get("regions_covered", []),
         "current_conditions": parsed.get("current_conditions", {}),
         "stage_of_crop_cycle": stage_of_crop_cycle,
         "risk_assessment": parsed.get("risk_assessment", {}),
+        **({"invalidation": parsed["invalidation"]} if "invalidation" in parsed else {}),
         **unparsed,
         "degraded": degraded or not complete or loop_result.tool_errors > 0,
     }

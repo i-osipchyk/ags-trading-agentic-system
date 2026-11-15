@@ -6,7 +6,7 @@ from typing import Protocol
 import requests
 from pypdf import PdfReader
 
-from ags.tools.pit_store import is_released, write_pit
+from ags.tools.pit_store import is_released, read_pit, write_pit
 
 SOURCE = "cocoa_grinds"
 REPORT = "quarterly"
@@ -133,6 +133,20 @@ class CocoaGrindsClient:
             if record is not None and is_released(SOURCE, date.fromisoformat(record["published"]), as_of):
                 return record
         return None
+
+
+class ArchivedGrindsClient:
+    """Serves each region's latest release already archived at `as_of`, and never fetches (frozen runs, frozen.py).
+
+    `get_grinds` fetches on every call and archives each release once, as first published, so the archive holds
+    exactly the release a past cycle saw.
+    """
+
+    def __init__(self, data_dir) -> None:
+        self._data_dir = data_dir
+
+    def get_release(self, region: str, *, as_of: datetime) -> dict | None:
+        return read_pit(self._data_dir, source=SOURCE, report=REPORT, symbol=region, as_of=as_of)
 
 
 def get_grinds(data_dir, *, as_of: datetime, client: GrindsClient) -> dict:

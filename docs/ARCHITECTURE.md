@@ -69,6 +69,8 @@ scripts/                 # every CLI and helper script
   run_auditor.py         # trigger due checkpoint evaluations (all, or one via --run-id/--weeks)
   run_chat.py            # Streamlit app: dashboard (default), runs grid, scorecard, chat over frozen runs
   fetch_candles.py       # fill the local daily-candle cache to the last closed session (cTrader market data; the pull job runs it)
+  run_challenger.py      # run the aligned pipeline over past official runs on their frozen inputs, into replays/analysts/<batch>/ (plan only without --run)
+  replay_analysts.py     # rerun one official run on its frozen inputs, as the live pipeline, the aligned one, or both (read-only; writes under replays/analysts/)
   run_scorecard.py       # score the logged calls against the baselines, printed (read-only, local mirror)
   sync_local.sh          # pull-only S3 → local mirror (v3); optional prefix args (the UI pulls portfolio logs attempts data)
   put_secrets.py         # .env → SSM /ags/<env>/* (v3)
@@ -229,10 +231,10 @@ The fixture suite gains intraday cases: same-day release before vs after
   `corn_2026-09-11T18-30-00Z`). Each line:
   `{seq, agent, event_type: prompt|tool_call|tool_result|output, payload, timestamp}`.
 - **Run events beyond the four above:** each commodity run opens with a `pipeline`/`version`
-  event, `{code_version, prompt_hashes, model}`: the git SHA the image was built from
+  event, `{code_version, prompt_hashes, aligned, model}`: the git SHA the image was built from
   (`GIT_SHA`, else the checkout's HEAD) and a 12-character hash per model agent's system prompt
-  template (`technical`, `news`, `weather`, `coordinator`, plus `all`), so a scorecard can be cut
-  by version (`versioning.py`). After the analysts finish it logs `pipeline`/`freshness`, one
+  template (`technical`, `news`, `weather`, `coordinator`, plus `all`; the aligned variants' hashes when
+  `aligned` is true), so a scorecard can be cut by version (`versioning.py`). After the analysts finish it logs `pipeline`/`freshness`, one
   entry per source: `{source, latest, age_days, max_age_days, stale, detail}` (`freshness.py`).
   Limits: drought map 10 days, CPC outlook 40, WASDE or other supply/demand report 40, cocoa grinds
   120, news 3 days on its newest headline. Drought and outlook read the newest stored release over the
@@ -258,6 +260,103 @@ The fixture suite gains intraday cases: same-day release before vs after
 - **On S3 (v3):** S3 has no append. In a Lambda, `RunLog` writes JSONL to
   `/tmp` as today and uploads the file once, at the end of the run and from
   a `finally` block on failure — so a crashed run still leaves its log.
+
+## Frozen inputs (rerunning a cycle on what it saw)
+
+A rerun that fetches again sees different data than the cycle did: the news analyst picks its own search queries
+and Tavily cannot reproduce a past search, the intraday quote is live-only, and the CFTC positioning is refetched
+on every call. Two runs of the same cycle therefore disagreed, and the difference could not be told apart from a
+change in the prompts. `run_pipeline(..., frozen=FrozenInputs)` (`ags/frozen.py`) removes that:
+
+- **Taken from the official run's log** (`frozen_from_events`): every article any `search_news` call returned,
+  deduplicated by URL (a rerun's `search_news` returns all of them whatever its query, and `fetch_document` reads
+  only the stored text, answering "unavailable" otherwise); the intraday reference quote (so `price_at_call` is the
+  cycle's); and the positioning the technical analyst was given.
+- **Everything else is read from the point-in-time store at the cycle's own `as_of`:** prices, the drought map,
+  the CPC outlook, USDA releases, and the archives of the two sources that are refetched on every call: the
+  cocoa grind releases (`ArchivedGrindsClient`) and the Open-Meteo forecast. The forecast is live-only, so a
+  `now` more than an hour past `as_of` reads only the archive written by that cycle and never fetches (this also
+  closes a leak for any replayed `as_of`).
+- **Every source client is `NoFetch`:** a read of anything not stored raises `FrozenInputError` and degrades that
+  analyst instead of quietly fetching what is public today. The `version` event records `frozen_from`.
+- **`scripts/replay_analysts.py --run-id <official run>`** reruns the live pipeline, the aligned one or both. The
+  earlier official logs feed the track record and the news carry-forward through a `LayeredStorage` that hides the
+  official log of the run itself, and everything the rerun writes goes under `replays/analysts/<run-id>/`, never
+  the official record. What still differs between two frozen runs is only what the models do with the same
+  inputs.
+
+### Running the challenger over past runs
+
+`scripts/run_challenger.py` reruns the official runs from `--since` (default 2026-10-13, `scoring.REVIEW_START`)
+at the cycle times (`--slots`; default both schedules: 04:00 and 16:00 ET until 2026-10-28, 06:00 and 12:30 since)
+as the aligned pipeline, only (the live results are already in the official record and are not rerun). `ags/challenger.py`:
+
+- **Plan first:** without `--run` it prints the run count, a rough cost (the official runs' own cost x 1.0, as measured on a pilot day) and time.
+- **Layout:** each rerun's log goes to `replays/analysts/<batch>/logs/<run_id>.jsonl`, the same shape as an
+  official log, so the scoring code reads it as it is. The official record is never written.
+- **Chains and parallelism:** a commodity's runs go in time order, so a 12:30 (or 04:00) run carries forward the
+  news of the challenger's own earlier search, as the live cycle does; commodities run in parallel (`--workers`).
+  A rerun does what its cycle did about the news (searched or carried, `FrozenInputs.news_fetched`), not what
+  today's rule says, because the schedule moved on 2026-10-28.
+- **Track record:** the coordinator reads the official logs (`track_record_dir`), so the past calls it reviews are
+  the ones the audits graded.
+- **Resume and stop:** a run whose log already has a call is skipped; a failure is written to
+  `failures.jsonl` and the batch goes on; a provider blocking every call (no credit, a rejected key) stops it.
+
+The Scorecard page's "Challenger" section (`scoring.compare_challenger`) scores a batch against the official calls
+on the official rows it re-made, with identical prices, baselines and weights: both coordinators side by side
+(and always long, always short, trend), challenger minus official with a bootstrap interval, how often the calls
+agree, each analyst's bias scored as a position (the technical analyst's mechanical `code_bias` next to its final
+bias, so the model's adjustments are judged), and the pass bar on the matched cycles.
+
+### Equity curves on the challenger's calls
+
+`scripts/challenger_equity.py` (run with `uv run --with matplotlib`, which is not a project dependency) replays
+the shadow book, the fixed mechanical sizer behind the deterministic guardrails, on the live calls and on the
+challenger's, from a flat 10k and a flat 100k account, through the same stage and the same M5-priced fills as
+`scripts/run_shadow_replay.py` (the shared pricing is in `ags/replay/shadow_prices.py`). The two books differ only in
+their calls. It writes `replays/challenger-equity/` (`equity-fallback.png`, `equity-matched.png`, `series.json`,
+one book store per curve) and never the official record. No model call and no order; the manager stage is stubbed
+to hold, so only the shadow book is meaningful (it does not show what the LLM manager would have done with the
+challenger's calls). Where the challenger has no call (coffee, sugar and cocoa before 2026-11-02, ad hoc cycles) two
+policies are drawn: `fallback` (the challenger book uses the live call there, so both trade everything) and
+`matched` (neither book trades a commodity-cycle the challenger has no call for). With the live calls under
+`fallback` the replay tracks the recorded shadow book closely, which is the check on the simulator.
+
+## Aligned analyst output (challenger; ROADMAP.md Step 1)
+
+`run_pipeline(..., aligned=True)` (default off; no handler sets it, so the scheduled cycle is unchanged) gives
+the coordinator the same envelope from all four analysts. Off, the prompts, replies and outputs are exactly as
+before.
+
+- **Envelope** (`alignment.py`): `bias` on the analyst's own `scale` (price analysts -2..+2, weather -1..+1),
+  `code_bias`, `bias_source` (`code` | `code+model`), `scale` with what each value means, `confidence` 1-5,
+  `horizon` (`days` | `1 week` | `weeks` | `month`), `drivers`, `invalidation`, `basis`, `context`. The
+  analyst's evidence fields stay beside it.
+- **Computed in code, after the analysts, on their finished outputs** (`agents/aligned.py`), so they stay
+  blind to each other: technical from the three trend states; supply/demand from the ending-stocks revision
+  (cocoa: year-on-year grinds); news as a recency-weighted roll-up of the headline directions; weather from the
+  model's regional labels times the crop stage's weight. Weather's `context` and `basis` state the stage and
+  that its weighting is already in the number. A crashed analyst gets no envelope; a failing alignment keeps the
+  evidence and sets `alignment_error`.
+- **Aligned prompts** (`ALIGNED_SYSTEM_PROMPT_TEMPLATE` in the technical, news and weather agents): technical
+  is told its mechanical bias and may move it one step with a stated reason (`bias_adjustment`,
+  `adjustment_reason`); weather labels conditions `favourable` | `benign` | `watch` | `severe` and is told not
+  to soften them for the stage; each also returns `invalidation`. A reply missing one of these fields degrades
+  the run like any other schema miss. Supply/demand has no prompt.
+- **Coordinator** (`ALIGNED_SYSTEM_PROMPT_TEMPLATE` in `agents/coordinator.py`): the prompt explains the
+  envelope: what `bias`, `scale`, `confidence`, `horizon`, `bias_source` and `code_bias` mean, that the scales
+  differ (weather -1..+1) so strength is judged against each analyst's own scale, that weather's stage is already
+  in its number, and how a carried-forward, degraded or crashed output is weighed. It no longer names
+  supporting and dissenting analysts: `derive_support` does, from the signs of the biases (supports when the
+  bias has the call's sign, a neutral call: a bias of 0; dissents on the opposite sign, or on any non-zero bias
+  for a neutral call; a crashed analyst or one without a bias takes no side). The conviction rubric keeps its
+  rungs, now anchored to that derived support, and the same code cap applies (5 needs all four supporting, 4
+  needs three), with the model told about a breach for its one retry, as before.
+- **Comparing runs:** use frozen inputs (§ Frozen inputs), so both variants see the same news, quote and
+  positioning.
+- **Not done yet:** running the challenger beside the live cycle on every new cycle (today it is run in batches
+  over past runs, locally).
 
 ## Trigger and UI
 
@@ -310,8 +409,8 @@ revisit.
   the same cycle, needing at least 4). Each commodity counts once per ISO week of the call (its calls that week share a
   weight of 1; a week with fewer than the 10 scheduled calls, such as a one-off dev run or the week in progress,
   is worth its share), so the effective count is commodity-weeks and effective weeks are the calendar weeks of
-  evidence. "Since" defaults to `scoring.REVIEW_START`, 2026-10-13, the first scheduled-cycle day, until the
-  owner's clean start date replaces it;
+  evidence. "Since" defaults to `scoring.REVIEW_START`, 2026-10-13, the review window's start as the owner
+  confirmed it (the first scheduled-cycle day);
   intervals are bootstrapped over the same (commodity, ISO week) clusters. Cuts: by week,
   commodity, code/prompt version (`pipeline`/`version` event; older runs "unversioned"), stated conviction (directional calls only; scoring itself ignores conviction, every call is a full position) and bullish/bearish. The
   pass bar is `scoring.PASS_BAR`, fixed in code: at 1 week, market-neutral, the coordinator beats the trend
@@ -416,8 +515,9 @@ US cotton belt plus Brazil/India/China for cotton, the non-US ones through
 Open-Meteo point forecasts. Non-US regions have no drought index and no
 seasonal-outlook probabilities, only recent and forecast rainfall and
 temperature (min temperature for frost). Open-Meteo's free forecast API cannot
-be re-queried for a past `as_of`, so this input is live-only; counterfactual
-replay reuses the logged analyst outputs and never re-fetches it.
+be re-queried for a past `as_of`, so this input is live-only: each cycle's pull is archived and a replayed
+`as_of` reads only that archive (§ Frozen inputs); counterfactual replay reuses the logged analyst outputs and
+never re-fetches it.
 
 **Correction to the design doc's source list:** "ISMA" (listed alongside
 USDA/UNICA/Conab/ISO in both `CLAUDE.md` and the v2 design doc) does not

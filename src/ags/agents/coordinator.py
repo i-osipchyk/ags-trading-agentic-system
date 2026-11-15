@@ -46,6 +46,52 @@ not a miss. Use it to weigh drivers that did or didn't play out, not to
 override this week's analyst evidence."""
 
 
+# The aligned variant (ROADMAP.md Step 1): every analyst hands over the same envelope (alignment.py), the
+# conviction rubric is anchored to the signs of those biases, and which analysts support or dissent is derived by
+# code from them rather than named by the model.
+ALIGNED_SYSTEM_PROMPT_TEMPLATE = """You are the Coordinator for {commodity} futures.
+
+You synthesize the four analyst outputs below into one call for a fixed
+{horizon} horizon, as of {as_of}. You do not re-research: use only these
+outputs. Surface any disagreement explicitly rather than smoothing it over.
+
+Each analyst output carries the same fields next to its own evidence:
+  "bias": a signed integer for the PRICE of {commodity}: positive is bullish, negative bearish, 0 no view.
+  "scale": the range that bias is on and what each value means. The scales differ: technical, news and
+    supply_demand run -2..+2, weather runs -1..+1 because it only modifies supply. Compare signs, and judge
+    strength against each analyst's own scale: weather +1 is the strongest weather signal there is.
+  "confidence": 1-5, how well the evidence supports the bias.
+  "horizon": how long the view is meant to last ("days", "1 week", "weeks", "month"). Your call is for
+    {horizon}: a "days" view may fade before then, a "month" view will not.
+  "drivers" and "invalidation": what the bias rests on, and what would change it.
+  "basis": how the bias was reached.
+The biases are computed by code from facts, except where "bias_source" is "code+model": the analyst moved
+the mechanical "code_bias" one step and said why in "adjustment_reason". Weather states its crop stage in
+"context", and the stage weighting is already applied to its bias: do not discount it for the stage again.
+An output marked "carried_forward": true was not refreshed this cycle: it is the latest one from an earlier
+run (named by "source_run_id"), so weigh its age. An output with "degraded": true is partial, so weigh it as
+weaker evidence. An output with an "error" field crashed and carries no signal. Anything an analyst returned
+that didn't fit its schema is under "unparsed_reply": use it as evidence, weighed like a degraded output.
+
+An analyst supports your call when its bias has the call's sign (for a neutral call: a bias of 0) and dissents
+when its bias has the opposite sign; code works that out from the biases, so do not list them yourself.
+
+Conviction rubric (anchored to how many analysts support the call):
+  5 = all four analysts support it, no dissent
+  4 = three of four support it, dissent is minor/tangential
+  3 = split or mixed signals, going with a plurality read
+  2 = one or two weak signals against a backdrop of mostly neutral/no-signal analysts
+  1 = direction called mostly on priors, not fresh evidence this week
+
+Respond with a JSON object containing exactly these fields:
+  "call": "bullish" | "bearish" | "neutral"
+  "conviction": integer 1-5 per the rubric
+  "thesis": short synthesis text
+  "key_drivers": list of {{"driver": ..., "source": the analyst it came from (technical/news/weather/supply_demand)}}
+  "invalidation_conditions": list of what would prove the call wrong
+No other text — JSON only.""" + SYSTEM_PROMPT_TEMPLATE[SYSTEM_PROMPT_TEMPLATE.index("\n\nIf the read_track_record tool is available"):]
+
+
 def _rubric_violations(conviction: int, supporting: list, dissenting: list, analyst_outputs: dict) -> list[str]:
     violations = []
     # Only the agreement-anchored rungs are checkable from the output alone:
@@ -74,6 +120,30 @@ def _capped_conviction(conviction: int, supporting: list, dissenting: list) -> i
 
 
 _CALLS = {"bullish", "bearish", "neutral"}
+_CALL_SIGN = {"bullish": 1, "bearish": -1, "neutral": 0}
+_ORDER = ("technical", "news", "weather", "supply_demand")
+
+
+def derive_support(call: str, analyst_outputs: dict) -> tuple[list[str], list[str]]:
+    """Who supports and who dissents, from the analysts' signed biases (aligned runs).
+
+    An analyst supports a call when its bias has the call's sign (a neutral call: a bias of 0) and dissents when
+    it has the opposite sign, so a bullish call is dissented from by a negative bias and a neutral call by any
+    non-zero one. A crashed analyst, and one with no bias, take neither side.
+    """
+    sign = _CALL_SIGN[call]
+    supporting, dissenting = [], []
+    for analyst in _ORDER:
+        output = analyst_outputs.get(analyst) or {}
+        bias = output.get("bias")
+        if "error" in output or not isinstance(bias, int) or isinstance(bias, bool):
+            continue
+        own = (bias > 0) - (bias < 0)
+        if own == sign:
+            supporting.append(analyst)
+        elif sign == 0 or own == -sign:
+            dissenting.append(analyst)
+    return supporting, dissenting
 _ANALYSTS = {"technical", "news", "weather", "supply_demand"}
 
 
@@ -105,20 +175,22 @@ _FIELD_RULES = {
     "key_drivers": (_driver_list, f"must be a list of {{driver, source}}, source one of {_ANALYST_NAMES}"),
     "invalidation_conditions": (_text_list, "must be a list of text"),
 }
+# The aligned reply leaves out the two analyst lists: code derives them from the biases (derive_support).
+_ALIGNED_FIELD_RULES = {k: v for k, v in _FIELD_RULES.items() if k not in ("supporting_analysts", "dissenting_analysts")}
 _FIELDS = tuple(_FIELD_RULES)
 # Without these there is no call to size; every other field falls back to empty on its own.
 _CORE_FIELDS = {"call", "conviction"}
 
 
-def _invalid_fields(parsed: dict) -> dict[str, str]:
+def _invalid_fields(parsed: dict, aligned: bool = False) -> dict[str, str]:
     """Why each unusable field is wrong; empty when the reply fits the schema."""
     invalid = {}
-    for field, (valid, rule) in _FIELD_RULES.items():
+    for field, (valid, rule) in (_ALIGNED_FIELD_RULES if aligned else _FIELD_RULES).items():
         if field not in parsed:
             invalid[field] = "missing"
         elif not valid(parsed[field]):
             invalid[field] = rule
-    if not {"supporting_analysts", "dissenting_analysts"} & invalid.keys():
+    if not aligned and not {"supporting_analysts", "dissenting_analysts"} & invalid.keys():
         both = sorted(set(parsed["supporting_analysts"]) & set(parsed["dissenting_analysts"]))
         if both:
             for field in ("supporting_analysts", "dissenting_analysts"):
@@ -126,13 +198,17 @@ def _invalid_fields(parsed: dict) -> dict[str, str]:
     return invalid
 
 
-def _reply_problems(parsed: object, analyst_outputs: dict) -> list[str]:
+def _reply_problems(parsed: object, analyst_outputs: dict, aligned: bool = False) -> list[str]:
     """What to send back for the one retry: schema problems, then rubric breaches."""
     if not isinstance(parsed, dict):
         return ["the reply must be a JSON object"]
-    invalid = _invalid_fields(parsed)
+    invalid = _invalid_fields(parsed, aligned)
     problems = [f"{field}: {why}" for field, why in invalid.items()]
-    if not {"conviction", "supporting_analysts", "dissenting_analysts"} & invalid.keys():
+    if aligned:
+        if not {"call", "conviction"} & invalid.keys():
+            supporting, dissenting = derive_support(parsed["call"], analyst_outputs)
+            problems += _rubric_violations(parsed["conviction"], supporting, dissenting, analyst_outputs)
+    elif not {"conviction", "supporting_analysts", "dissenting_analysts"} & invalid.keys():
         problems += _rubric_violations(
             parsed["conviction"], parsed["supporting_analysts"], parsed["dissenting_analysts"], analyst_outputs
         )
@@ -176,8 +252,9 @@ def run_coordinator(
     analyst_outputs: dict,
     price_at_call: dict | None = None,
     track_record: Callable[[int], list[dict]] | None = None,
+    aligned: bool = False,
 ) -> dict:
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(commodity=commodity, as_of=as_of.isoformat(), horizon=HORIZON)
+    system_prompt = (ALIGNED_SYSTEM_PROMPT_TEMPLATE if aligned else SYSTEM_PROMPT_TEMPLATE).format(commodity=commodity, as_of=as_of.isoformat(), horizon=HORIZON)
     user_prompt = (
         f"Analyst outputs for {commodity} as of {as_of.isoformat()}:\n"
         + json.dumps(analyst_outputs, indent=2, default=str)
@@ -203,7 +280,7 @@ def run_coordinator(
 
     loop_result = run_json_loop(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools,
-        validate=lambda parsed: _reply_problems(parsed, analyst_outputs),
+        validate=lambda parsed: _reply_problems(parsed, analyst_outputs, aligned),
     )
     try:
         parsed = json.loads(loop_result.content)
@@ -213,14 +290,17 @@ def run_coordinator(
         # A malformed call degrades the run rather than crashing the pipeline,
         # same as the analysts; the null call is still logged and scoreable.
         return _result(price_at_call, degraded=True)
-    invalid = _invalid_fields(parsed)
+    invalid = _invalid_fields(parsed, aligned)
     if _CORE_FIELDS & invalid.keys():
         return _result(price_at_call, degraded=True, invalid_fields=invalid)
 
     # Past the retry, a bad non-core field falls back to empty and degrades the call instead of voiding it.
-    valid = {field: parsed[field] for field in _FIELDS if field not in invalid}
-    supporting = valid.get("supporting_analysts", [])
-    dissenting = valid.get("dissenting_analysts", [])
+    valid = {field: parsed[field] for field in _FIELDS if field in parsed and field not in invalid}
+    if aligned:
+        supporting, dissenting = derive_support(parsed["call"], analyst_outputs)
+    else:
+        supporting = valid.get("supporting_analysts", [])
+        dissenting = valid.get("dissenting_analysts", [])
     violations = _rubric_violations(parsed["conviction"], supporting, dissenting, analyst_outputs)
     # A crashed analyst carries no signal, so it neither supports nor dissents, whatever the reply says.
     crashed = _crashed(analyst_outputs)
