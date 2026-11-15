@@ -361,9 +361,19 @@ def get_prices(
 
     bars_by_date: dict[date, dict] = {}
     missing_days: list[date] = []
+    # One listing of the symbol's folder, not one per day (read_pit lists it every call: a three-year look-back was
+    # a thousand listings of a thousand files, 26 s on a local mirror and a thousand LIST requests on S3). A day's
+    # record is the file stamped with that day, which is what read_pit(as_of=end of that day) picks when it exists.
+    store = as_storage(data_dir)
+    prefix = f"{SOURCE}/{REPORT}/{commodity}/"
+    stored = {
+        key[len(prefix) : -len(".json")]: key
+        for key in store.list(prefix) if key.endswith(".json") and "/" not in key[len(prefix) :]
+    }
     day = stamp_start
     while day <= stamp_end:
-        release = read_pit(data_dir, source=SOURCE, report=REPORT, symbol=commodity, as_of=end_of_day(day))
+        key = stored.get(day.isoformat())
+        release = json.loads(store.get(key)) if key is not None else None
         if release is not None and release["date"] == day.isoformat():
             if not release.get("no_trading"):
                 bars_by_date[day] = release

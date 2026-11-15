@@ -231,3 +231,33 @@ def test_get_prices_includes_the_session_once_it_has_closed_at_1700_et(tmp_path)
     )
 
     assert [bar["date"] for bar in result] == ["2026-01-06", "2026-01-07"]
+
+
+def test_get_prices_lists_the_cache_once_however_long_the_look_back(tmp_path):
+    from datetime import date, datetime, timezone
+
+    from ags.storage import LocalStorage
+    from ags.tools.pit_store import write_pit
+    from ags.tools.sources.prices import get_prices
+
+    for i in range(40):
+        day = date(2026, 9, 1) + timedelta(days=i)
+        write_pit(tmp_path, source="ctrader", report="daily_bars", symbol="corn", release_date=day,
+                  content={"date": day.isoformat(), "close": 100.0 + i})
+
+    class Counting(LocalStorage):
+        lists = 0
+
+        def list(self, prefix):
+            Counting.lists += 1
+            return super().list(prefix)
+
+    class NoClient:
+        def get_daily_bars(self, *a):
+            raise AssertionError("everything is cached")
+
+    bars = get_prices(Counting(tmp_path), commodity="corn", start=date(2026, 9, 3), end=date(2026, 10, 8),
+                      as_of=datetime(2026, 10, 9, 21, 0, tzinfo=timezone.utc), client=NoClient(),
+                      now=datetime(2026, 10, 9, 21, 0, tzinfo=timezone.utc))
+
+    assert len(bars) == 36 and Counting.lists == 1

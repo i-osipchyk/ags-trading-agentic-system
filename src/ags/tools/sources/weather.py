@@ -6,7 +6,7 @@ from typing import Protocol
 import requests
 import shapefile
 
-from ags.tools.pit_store import ET, is_released, read_pit, refresh_due, write_pit
+from ags.tools.pit_store import ET, LIVE_CYCLE_MAX_AGE, is_released, read_pit, refresh_due, write_pit
 
 SOURCE_DROUGHT = "usdm"
 REPORT_DROUGHT = "drought_severity"
@@ -337,9 +337,14 @@ def _get_outlook(
     return record
 
 
-def _get_forecast(data_dir, *, region: str, as_of: datetime, client: WeatherClient) -> dict | None:
-    # A forecast goes stale within hours, so unlike the weekly drought map it is fetched every cycle (never
-    # served from the PIT store); each pull is archived under the cycle's own timestamp.
+def _get_forecast(
+    data_dir, *, region: str, as_of: datetime, client: WeatherClient, now: datetime | None = None
+) -> dict | None:
+    # A forecast goes stale within hours, so unlike the weekly drought map it is fetched every live cycle; each pull
+    # is archived under the cycle's own timestamp. The API cannot be asked for a past forecast, so a replayed
+    # `as_of` reads only that archive: fetching now would hand it a forecast that did not exist then.
+    if (now or datetime.now(timezone.utc)) - as_of > LIVE_CYCLE_MAX_AGE:
+        return read_pit(data_dir, source=SOURCE_FORECAST, report=REPORT_FORECAST, symbol=region, as_of=as_of)
     record = client.get_forecast(region, as_of=as_of)
     if record is not None:
         write_pit(
@@ -354,7 +359,7 @@ def get_weather(
     if client is None:
         client = USWeatherClient()
     if region in _OPEN_METEO_POINTS:
-        return {"region": region, "forecast": _get_forecast(data_dir, region=region, as_of=as_of, client=client)}
+        return {"region": region, "forecast": _get_forecast(data_dir, region=region, as_of=as_of, client=client, now=now)}
     drought = _get_drought(data_dir, region=region, as_of=as_of, client=client, now=now)
     outlook = _get_outlook(data_dir, region=region, as_of=as_of, client=client, now=now)
     return {"region": region, "drought": drought, "outlook": outlook}
