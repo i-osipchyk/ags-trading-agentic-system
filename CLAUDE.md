@@ -159,6 +159,11 @@ ags-specific parts are here.
   (`bind(client, "<agent>", commodity=..., run_id=...)`); the root `LLMClient` refuses to
   complete unbound. Run logs remain the audit trail; llmkit adds usage and cost
   (`usage.cost_usd` in the run log comes from it — don't add a second price table).
+- **Grounded news (a deliberate deviation):** `tools/sources/grounded_news.py` calls Gemini with Google Search
+  through the `google-genai` SDK directly, not through llmkit (llmkit has no Gemini provider; the platform
+  rule is for model calls an agent reasons with, and this one is a search tool). Its token and search counts are
+  kept in the archived raw answer (`usage`), not in llmkit cost records. Off by default (`NEWS_GROUNDING`),
+  forward-only, beside Tavily.
 - **Secrets:** SSM SecureStrings at `/ags/<env>/<kebab-name>`, pushed with
   `uv run python scripts/put_secrets.py --env live`. `config.load_env()` loads them; never put
   values in Terraform.

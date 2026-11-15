@@ -6,8 +6,11 @@ from ags.config import Config
 from ags.notify.balances import provider_balances
 from ags.portfolio.stage import PortfolioConfig
 from ags.storage import S3Storage, Storage
+from ags.tools.sources.combined_news import CombinedNewsClient
 from ags.tools.sources.cot import SocrataCotClient
 from ags.tools.sources.grinds import CocoaGrindsClient
+from ags.tools.sources.grounded_news import GroundedNewsClient
+from ags.tools.sources.news import TavilyNewsClient
 
 LATE_START_LIMIT = timedelta(hours=1)
 # A slot that was attempted but never reached the book (a held cycle) may be retried this late.
@@ -86,6 +89,13 @@ def lazy(make: Callable[[], object]) -> Callable[[], object]:
     return get
 
 
+def news_client_from(env, config: Config) -> object | None:
+    """Tavily plus Google grounding when NEWS_GROUNDING is "on" (and a Gemini key is set); else None, i.e. Tavily alone."""
+    if (env.get("NEWS_GROUNDING") or "off").strip().lower() != "on":
+        return None
+    return CombinedNewsClient(TavilyNewsClient(config), GroundedNewsClient(api_key=env["GEMINI_API_KEY"]))
+
+
 def build_runtime(
     env, *, config: Config, ssm_client, chat_factory, market_factory, alert_factory=None, trading_factory=None
 ) -> Runtime:
@@ -102,7 +112,7 @@ def build_runtime(
     return Runtime(
         config=config, storage=S3Storage(env["AGS_BUCKET"]),
         chat_client=chat_factory(config), model=config.deepseek_model, market_client=market_factory(config),
-        cot_client=SocrataCotClient(), grinds_client=CocoaGrindsClient(),
+        cot_client=SocrataCotClient(), grinds_client=CocoaGrindsClient(), news_client=news_client_from(env, config),
         now=lambda: datetime.now(timezone.utc), portfolio_config=PortfolioConfig.from_mapping(env),
         breaker_reset_at=breaker_reset_at, alert=alert_factory(config) if alert_factory else (lambda message: None),
         retry_window=retry_window_from(env), balances=lambda: provider_balances(config),

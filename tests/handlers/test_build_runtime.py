@@ -79,3 +79,13 @@ def test_runtime_alert_is_built_from_the_config():
     runtime.alert("boom")
 
     assert sent == [("tv", "boom")]
+
+
+@mock_aws
+def test_news_runs_on_tavily_alone_unless_grounding_is_switched_on():
+    from ags.handlers.runtime import news_client_from
+    from ags.tools.sources.combined_news import CombinedNewsClient
+
+    assert news_client_from({}, CONFIG) is None
+    assert news_client_from({"NEWS_GROUNDING": "off", "GEMINI_API_KEY": "g"}, CONFIG) is None
+    assert isinstance(news_client_from({"NEWS_GROUNDING": "on", "GEMINI_API_KEY": "g"}, CONFIG), CombinedNewsClient)
