@@ -261,3 +261,13 @@ def test_search_records_an_exhausted_quota_as_blocking():
 
     assert SOURCE in blockers.seen()
     blockers.clear()
+
+
+def test_an_add_on_client_never_records_a_blocker_so_it_cannot_hold_a_cycle():
+    blockers.clear()
+    client = GroundedNewsClient(client=FakeGenai(error=_api_error(401, "UNAUTHENTICATED")), blocking=False)
+
+    with pytest.raises(errors.ClientError):
+        client.search("corn futures news", published_before=date(2026, 6, 5))
+
+    assert blockers.seen() == {}

@@ -44,10 +44,15 @@ class GroundedNewsClient:
     line is cited to. A line with no date or no cited source is dropped.
     """
 
-    def __init__(self, *, api_key: str | None = None, client=None, model: str = _MODEL, resolve_url=_follow_redirect):
+    def __init__(
+        self, *, api_key: str | None = None, client=None, model: str = _MODEL, resolve_url=_follow_redirect,
+        blocking: bool = True,
+    ):
         self._client = client or genai.Client(api_key=api_key)
         self._model = model
         self._resolve_url = resolve_url
+        # False when grounding is an add-on: its auth or quota failure is then not allowed to hold a cycle.
+        self._blocking = blocking
         self.last_raw_response: dict | None = None
 
     def search(self, query: str, *, published_before: date) -> list[dict]:
@@ -63,7 +68,7 @@ class GroundedNewsClient:
                 ),
             )
         except errors.ClientError as exc:
-            if exc.code in _BLOCKING_CODES or (exc.code == 429 and _QUOTA_MESSAGE in str(exc.message)):
+            if self._blocking and (exc.code in _BLOCKING_CODES or (exc.code == 429 and _QUOTA_MESSAGE in str(exc.message))):
                 blockers.record(SOURCE, f"{type(exc).__name__}: {exc}")
             raise
         candidate = response.candidates[0]

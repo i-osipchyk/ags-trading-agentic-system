@@ -89,3 +89,4 @@ def test_news_runs_on_tavily_alone_unless_grounding_is_switched_on():
     assert news_client_from({}, CONFIG) is None
     assert news_client_from({"NEWS_GROUNDING": "off", "GEMINI_API_KEY": "g"}, CONFIG) is None
     assert isinstance(news_client_from({"NEWS_GROUNDING": "on", "GEMINI_API_KEY": "g"}, CONFIG), CombinedNewsClient)
+    assert news_client_from({"NEWS_GROUNDING": "on", "GEMINI_API_KEY": "g"}, CONFIG)._grounded._blocking is False

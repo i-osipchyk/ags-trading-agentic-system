@@ -93,7 +93,7 @@ def news_client_from(env, config: Config) -> object | None:
     """Tavily plus Google grounding when NEWS_GROUNDING is "on" (and a Gemini key is set); else None, i.e. Tavily alone."""
     if (env.get("NEWS_GROUNDING") or "off").strip().lower() != "on":
         return None
-    return CombinedNewsClient(TavilyNewsClient(config), GroundedNewsClient(api_key=env["GEMINI_API_KEY"]))
+    return CombinedNewsClient(TavilyNewsClient(config), GroundedNewsClient(api_key=env["GEMINI_API_KEY"], blocking=False))
 
 
 def build_runtime(
