@@ -41,7 +41,7 @@ def handle(event: dict, runtime: Runtime) -> dict:
         chat_client=runtime.chat_client, model=runtime.model,
         log_dir=Prefixed(runtime.storage, "logs"), data_dir=Prefixed(runtime.storage, "data"),
         audit_dir=Prefixed(runtime.storage, "audits"), prices_client=runtime.market_client,
-        news_client=runtime.news_client, weather_client=runtime.weather_client, usda_client=runtime.usda_client,
+        news_client=runtime.news_client, midday_news_client=runtime.midday_news_client, weather_client=runtime.weather_client, usda_client=runtime.usda_client,
         cot_client=runtime.cot_client, grinds_client=runtime.grinds_client, replace_log=earlier is not None,
     )
     blocked = blockers.seen()

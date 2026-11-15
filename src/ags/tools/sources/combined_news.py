@@ -56,3 +56,28 @@ class CombinedNewsClient:
 
     def extract(self, url: str) -> dict:
         return self._tavily.extract(url)
+
+
+class GroundedNewsOnlyClient:
+    """Grounding alone, for the 12:30 ET cycle: Tavily is searched in the morning only (its credits).
+
+    Same result shape and raw-record layout as `CombinedNewsClient`, with no Tavily half. It has no `extract`; the
+    midday news analyst runs without the `fetch_document` tool.
+    """
+
+    def __init__(self, grounded) -> None:
+        self._grounded = grounded
+        self.last_raw_response: dict | None = None
+
+    def search(self, query: str, *, published_before: date) -> list[dict]:
+        self._grounded.last_raw_response = None
+        try:
+            grounded = self._grounded.search(query, published_before=published_before)
+        finally:
+            self.last_raw_response = {grounded_news.SOURCE: self._grounded.last_raw_response}
+        return [
+            {**item, "provider": grounded_news.SOURCE} for item in grounded if is_article_url(item["url"])
+        ]
+
+    def extract(self, url: str) -> dict:
+        raise NotImplementedError("grounding-only news has no document extraction")

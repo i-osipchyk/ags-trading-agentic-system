@@ -71,3 +71,26 @@ def test_a_grounding_failure_still_returns_tavilys_results_and_no_stale_raw_answ
 
 def test_extract_goes_to_tavily():
     assert CombinedNewsClient(FakeTavily([]), FakeGrounded()).extract("https://a.com/1")["text"] == "body"
+
+
+def test_grounding_alone_tags_filters_and_keeps_the_raw_answer_in_the_same_layout():
+    from ags.tools.sources.combined_news import GroundedNewsOnlyClient
+
+    grounded = FakeGrounded([_item("https://b.com/2"), _item("https://youtu.be/x")])
+    client = GroundedNewsOnlyClient(grounded)
+
+    results = client.search("corn", published_before=DAY)
+
+    assert [(r["url"], r["provider"]) for r in results] == [("https://b.com/2", "google_grounding")]
+    assert client.last_raw_response == {"google_grounding": {"query": "corn"}}
+
+
+def test_grounding_alone_keeps_no_stale_raw_answer_when_the_call_raises():
+    from ags.tools.sources.combined_news import GroundedNewsOnlyClient
+
+    client = GroundedNewsOnlyClient(FakeGrounded(error=RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError):
+        client.search("corn", published_before=DAY)
+
+    assert client.last_raw_response == {"google_grounding": None}

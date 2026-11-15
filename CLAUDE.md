@@ -31,7 +31,9 @@ Per commodity, every cycle:
   timeframes via `tf` (M15, M30, H1); the latest daily candles are in its prompt
 - **News analyst** — recent headlines, deduped, no commentary. Searches (Tavily) on
   the 06:00 ET cycle only; at 12:30 it carries the latest searched output forward
-  (`carried_forward`, `source_run_id`), with no search and no model call
+  (`carried_forward`, `source_run_id`), with no search and no model call. With `NEWS_GROUNDING=on`,
+  06:00 searches Tavily and Google grounding together, and 12:30 runs the analyst on grounding alone (no
+  Tavily, no `fetch_document`), carrying the morning's output only if that finds nothing
 - **Weather/season analyst** — regional conditions + crop growth stage
 - **Supply/demand analyst** — USDA/UNICA/Conab/ISO report data (plus
   ICO/ICCO/ICAC for coffee/cocoa/cotton as needed — see `ARCHITECTURE.md`).

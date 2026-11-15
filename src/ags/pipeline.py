@@ -138,6 +138,7 @@ def run_pipeline(
     audit_dir: Path | None = None,
     prices_client=None,
     news_client=None,
+    midday_news_client=None,
     weather_client=None,
     usda_client=None,
     cot_client=None,
@@ -155,13 +156,13 @@ def run_pipeline(
     try:
         with trace(chat_client, run_id):
             return _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
-                        log_store, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, cot_client, grinds_client, now)
+                        log_store, data_dir, audit_dir, prices_client, news_client, midday_news_client, weather_client, usda_client, cot_client, grinds_client, now)
     finally:
         raw_log.close()
 
 
 def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, model,
-         log_dir, data_dir, audit_dir, prices_client, news_client, weather_client, usda_client, cot_client, grinds_client, now) -> dict:
+         log_dir, data_dir, audit_dir, prices_client, news_client, midday_news_client, weather_client, usda_client, cot_client, grinds_client, now) -> dict:
     reference = _reference_quote(data_dir, commodity, as_of, prices_client, now)
     run_log = _SharedRunLog(raw_log)
     run_log.append(agent="pipeline", event_type="version", payload={**version_stamp(), "model": model})
@@ -169,6 +170,20 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
 
     def _client(agent: str) -> LoggingChatClient:
         return LoggingChatClient(chat_client, run_log, agent, commodity=commodity, run_id=run_id)
+
+    def _carried() -> dict:
+        # Bounded by both: a local run's trigger is wall-clock time, which can be after as_of.
+        return carry_forward_news(log_dir, commodity=commodity, before=min(as_of, trigger_timestamp))
+
+    def _midday_news() -> dict:
+        # Grounding searches the 12:30 cycle (Tavily only the morning's); with it off, or if it came back with
+        # nothing, the morning's output is carried as before.
+        if midday_news_client is None:
+            return _carried()
+        output = run_news_analyst(
+            data_dir, _client("news"), news_client=midday_news_client, fetch_documents=False, **common
+        )
+        return output if output["headlines"] else _carried()
 
     analysts = {
         "technical": lambda: run_technical_analyst(
@@ -178,8 +193,7 @@ def _run(raw_log, run_id, commodity, as_of, trigger_timestamp, chat_client, mode
         "news": (
             (lambda: run_news_analyst(data_dir, _client("news"), news_client=news_client, **common))
             if fetches_news(as_of)
-            # Bounded by both: a local run's trigger is wall-clock time, which can be after as_of.
-            else lambda: carry_forward_news(log_dir, commodity=commodity, before=min(as_of, trigger_timestamp))
+            else _midday_news
         ),
         "weather": lambda: run_weather_analyst(
             data_dir, _client("weather"), weather_client=weather_client, **common

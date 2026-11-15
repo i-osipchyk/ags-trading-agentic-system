@@ -558,3 +558,34 @@ def test_supply_demand_is_computed_by_code_without_calling_the_model_and_still_l
     logged = [e for e in _events(tmp_path, result["run_id"]) if e["agent"] == "supply_demand"]
     assert [e["event_type"] for e in logged] == ["output"]
     assert logged[0]["payload"] == expected
+
+
+def _midday(tmp_path, chat, midday_news_client):
+    return run_pipeline(
+        commodity="corn", as_of=SECOND, trigger_timestamp=SECOND, chat_client=chat, model="stub-model",
+        log_dir=tmp_path / "logs", data_dir=tmp_path / "data", prices_client=FailingPricesClient(),
+        news_client=CountingNewsClient(), midday_news_client=midday_news_client, usda_client=FakeUsdaClient(),
+    )
+
+
+def test_a_midday_news_client_searches_the_12_30_cycle_instead_of_carrying_and_leaves_tavily_alone(tmp_path):
+    morning_tavily = CountingNewsClient()
+    _cycle(tmp_path, FIRST, _client_with_headline("Corn rallies"), morning_tavily)
+    chat = _client_with_headline("Corn slips at midday")
+
+    midday = _midday(tmp_path, chat, HeadlineNewsClient("Corn slips at midday"))
+
+    news = midday["outputs"]["news"]
+    assert [h["headline"] for h in news["headlines"]] == ["Corn slips at midday"]
+    assert not news.get("carried_forward")
+    news_call = next(m for m in chat.calls if "News analyst" in m[0]["content"])
+    assert "fetch_document is not available" in news_call[1]["content"]
+
+
+def test_a_midday_search_that_found_nothing_falls_back_to_the_carried_morning_news(tmp_path):
+    morning = _cycle(tmp_path, FIRST, _client_with_headline("Corn rallies"))
+
+    midday = _midday(tmp_path, RoutingChatClient(), HeadlineNewsClient(None))
+
+    assert midday["outputs"]["news"]["carried_forward"] is True
+    assert midday["outputs"]["news"]["source_run_id"] == morning["run_id"]

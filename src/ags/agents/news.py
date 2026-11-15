@@ -119,6 +119,7 @@ def run_news_analyst(
     as_of: datetime,
     model: str,
     news_client: NewsClient | None = None,
+    fetch_documents: bool = True,
 ) -> dict:
     seen: list[dict] = []  # every search result the model was shown, to tie its headlines back to
 
@@ -142,20 +143,25 @@ def run_news_analyst(
             },
             function=_search_news_tool,
         ),
-        ToolSpec(
-            name="fetch_document",
-            description="Full text of a news article, given its URL.",
-            parameters={
-                "type": "object",
-                "properties": {"url": {"type": "string"}},
-                "required": ["url"],
-            },
-            function=_fetch_document_tool,
-        ),
     ]
+    if fetch_documents:
+        tools.append(
+            ToolSpec(
+                name="fetch_document",
+                description="Full text of a news article, given its URL.",
+                parameters={
+                    "type": "object",
+                    "properties": {"url": {"type": "string"}},
+                    "required": ["url"],
+                },
+                function=_fetch_document_tool,
+            )
+        )
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(commodity=commodity, as_of=as_of.isoformat())
     user_prompt = f"Find recent news for {commodity} as of {as_of.isoformat()}."
+    if not fetch_documents:
+        user_prompt += " fetch_document is not available this cycle; judge each headline from the search result."
 
     loop_result = run_json_loop(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools

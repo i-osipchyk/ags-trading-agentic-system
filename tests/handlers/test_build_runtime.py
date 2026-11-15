@@ -90,3 +90,13 @@ def test_news_runs_on_tavily_alone_unless_grounding_is_switched_on():
     assert news_client_from({"NEWS_GROUNDING": "off", "GEMINI_API_KEY": "g"}, CONFIG) is None
     assert isinstance(news_client_from({"NEWS_GROUNDING": "on", "GEMINI_API_KEY": "g"}, CONFIG), CombinedNewsClient)
     assert news_client_from({"NEWS_GROUNDING": "on", "GEMINI_API_KEY": "g"}, CONFIG)._grounded._blocking is False
+
+
+def test_the_midday_news_client_is_grounding_alone_and_only_when_switched_on():
+    from ags.handlers.runtime import midday_news_client_from
+    from ags.tools.sources.combined_news import GroundedNewsOnlyClient
+
+    assert midday_news_client_from({}) is None
+    assert midday_news_client_from({"NEWS_GROUNDING": "off", "GEMINI_API_KEY": "g"}) is None
+    client = midday_news_client_from({"NEWS_GROUNDING": "on", "GEMINI_API_KEY": "g"})
+    assert isinstance(client, GroundedNewsOnlyClient) and client._grounded._blocking is False
