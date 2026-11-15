@@ -184,12 +184,16 @@ report day. Requirements:
   effective weeks, including a rising or choppy stretch.
 - The shape and scale of `bias` and `confidence`, and each analyst's horizon.
 - Whether to trim exposure around report days.
-- Which grounded source to use and what to pay; neither is settled.
+- Which grounded source to use and what to pay. First comparison and price estimate:
+  `docs/research/google-grounding-comparison-2026-11.md` and
+  `docs/research/google-grounding-pricing-2026-11.md` (about $0.87 a week if the free search
+  allowance is ours, about $5.84 if not); the choice is still open.
 
 ## 6. Unverified
 
-- Whether Gemini grounding with Google Search has a date filter, and its pricing. As far as
-  the review could tell it has no date filter; check before relying on that.
+- ~~Whether Gemini grounding has a date filter, and its pricing.~~ Answered 2026-11-15: the API has a
+  `time_range_filter`, but it is not enforced (a replay as of 2026-11-09 came back 86% dated after
+  the cycle), so grounding can only be evaluated forward. Price: see the pricing note linked above.
 - How far back Tavily's index goes for agricultural press, and what happened to the
   articles that stopped coming back (removed, or no longer matched).
 - Whether the deployed Lambda has picked up PRs #14 to #17 for every source. The logs showed
