@@ -239,3 +239,6 @@ plan.txt
 crash.log
 # Terraform per-env vars (the Python venv patterns above would hide them)
 !/infra/env/
+
+# Cached grounding answers (scripts/compare_grounding.py); billed, not reproducible
+grounding_compare/
