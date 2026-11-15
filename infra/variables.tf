@@ -40,6 +40,7 @@ variable "limits" {
     STARTING_EQUITY_USD   = "10000"
     SHADOW_RISK_BUDGET    = "0.01"
     STOP_OUT_MARGIN_LEVEL = "0.50"
+    NEWS_GROUNDING        = "on"    # Google grounding beside Tavily for news; needs /ags/live/gemini-api-key, else Tavily alone
     MANAGER_BOOK          = "paper" # "demo": the manager trades the Pepperstone demo account (DemoBook)
   }
 }

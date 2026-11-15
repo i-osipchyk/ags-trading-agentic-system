@@ -28,8 +28,9 @@ SECRETS: tuple[str, ...] = (
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
 )
-# Non-secret overrides; pushed only when set in .env (otherwise the code's default applies).
-OPTIONAL: tuple[str, ...] = ("CTRADER_DEMO", "CTRADER_TRADING_ACCOUNT_ID", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL", "MAX_TOOL_CALLS", "CHART_LOOKBACK_CANDLES")
+# Overrides and optional keys; pushed only when set in .env (otherwise the code's default applies, or, for
+# GEMINI_API_KEY, news runs on Tavily alone).
+OPTIONAL: tuple[str, ...] = ("CTRADER_DEMO", "CTRADER_TRADING_ACCOUNT_ID", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL", "MAX_TOOL_CALLS", "CHART_LOOKBACK_CANDLES", "GEMINI_API_KEY")
 
 
 def main() -> None:
@@ -37,9 +38,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", choices=["live"], required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--only", nargs="+", metavar="KEY", help="push just these keys, e.g. --only GEMINI_API_KEY")
     args = parser.parse_args()
 
     keys = [*SECRETS, *(k for k in OPTIONAL if os.getenv(k))]
+    if args.only:
+        unknown = [k for k in args.only if k not in (*SECRETS, *OPTIONAL)]
+        if unknown:
+            sys.exit(f"not a known key: {', '.join(unknown)}")
+        keys = list(args.only)
     missing = [k for k in keys if not os.getenv(k)]
     if missing:
         sys.exit(f"missing in .env: {', '.join(missing)}")

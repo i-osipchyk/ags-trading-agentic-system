@@ -119,8 +119,12 @@ def run_news_analyst(
     as_of: datetime,
     model: str,
     news_client: NewsClient | None = None,
+    fetch_documents: bool = True,
+    earlier: dict | None = None,
 ) -> dict:
     seen: list[dict] = []  # every search result the model was shown, to tie its headlines back to
+    prior = (earlier or {}).get("headlines") or []
+    seen.extend(prior)  # shown in the prompt, so the model may report them and they trace back
 
     # Both raise on a source failure: the loop reports it and asks the model to retry.
     def _search_news_tool(query: str) -> dict:
@@ -142,20 +146,33 @@ def run_news_analyst(
             },
             function=_search_news_tool,
         ),
-        ToolSpec(
-            name="fetch_document",
-            description="Full text of a news article, given its URL.",
-            parameters={
-                "type": "object",
-                "properties": {"url": {"type": "string"}},
-                "required": ["url"],
-            },
-            function=_fetch_document_tool,
-        ),
     ]
+    if fetch_documents:
+        tools.append(
+            ToolSpec(
+                name="fetch_document",
+                description="Full text of a news article, given its URL.",
+                parameters={
+                    "type": "object",
+                    "properties": {"url": {"type": "string"}},
+                    "required": ["url"],
+                },
+                function=_fetch_document_tool,
+            )
+        )
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(commodity=commodity, as_of=as_of.isoformat())
     user_prompt = f"Find recent news for {commodity} as of {as_of.isoformat()}."
+    if not fetch_documents:
+        user_prompt += " fetch_document is not available this cycle; judge each headline from the search result."
+    if prior:
+        user_prompt += (
+            "\n\nHeadlines this morning's 06:00 ET search already found (copy any still relevant exactly, with "
+            "your own direction and reason; add what the search finds that is new):\n"
+            + json.dumps(
+                [{k: h.get(k) for k in ("headline", "source", "date", "url")} for h in prior], indent=1
+            )
+        )
 
     loop_result = run_json_loop(
         chat_client, model=model, system_prompt=system_prompt, user_prompt=user_prompt, tools=tools
@@ -171,6 +188,7 @@ def run_news_analyst(
     return {
         "headlines": headlines,
         **({"dropped_untraceable": dropped} if dropped else {}),
+        **({"earlier_run_id": earlier.get("source_run_id")} if prior else {}),  # the 06:00 run whose headlines were offered
         **unparsed,
         "degraded": not complete or loop_result.tool_errors > 0,
     }

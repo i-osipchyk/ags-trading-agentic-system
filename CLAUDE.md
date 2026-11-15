@@ -31,7 +31,11 @@ Per commodity, every cycle:
   timeframes via `tf` (M15, M30, H1); the latest daily candles are in its prompt
 - **News analyst** — recent headlines, deduped, no commentary. Searches (Tavily) on
   the 06:00 ET cycle only; at 12:30 it carries the latest searched output forward
-  (`carried_forward`, `source_run_id`), with no search and no model call
+  (`carried_forward`, `source_run_id`), with no search and no model call. With `NEWS_GROUNDING=on`,
+  06:00 searches Tavily and Google grounding together, and 12:30 runs the analyst on grounding alone (no
+  Tavily, no `fetch_document`) with the morning's headlines in its prompt (`earlier_run_id`), carrying the
+  morning's output as is only if that finds nothing. On by default in `infra/variables.tf`; without a Gemini key
+  it falls back to Tavily alone
 - **Weather/season analyst** — regional conditions + crop growth stage
 - **Supply/demand analyst** — USDA/UNICA/Conab/ISO report data (plus
   ICO/ICCO/ICAC for coffee/cocoa/cotton as needed — see `ARCHITECTURE.md`).
@@ -159,6 +163,11 @@ ags-specific parts are here.
   (`bind(client, "<agent>", commodity=..., run_id=...)`); the root `LLMClient` refuses to
   complete unbound. Run logs remain the audit trail; llmkit adds usage and cost
   (`usage.cost_usd` in the run log comes from it — don't add a second price table).
+- **Grounded news (a deliberate deviation):** `tools/sources/grounded_news.py` calls Gemini with Google Search
+  through the `google-genai` SDK directly, not through llmkit (llmkit has no Gemini provider; the platform
+  rule is for model calls an agent reasons with, and this one is a search tool). Its token and search counts are
+  kept in the archived raw answer (`usage`), not in llmkit cost records. Off by default (`NEWS_GROUNDING`),
+  forward-only, beside Tavily.
 - **Secrets:** SSM SecureStrings at `/ags/<env>/<kebab-name>`, pushed with
   `uv run python scripts/put_secrets.py --env live`. `config.load_env()` loads them; never put
   values in Terraform.

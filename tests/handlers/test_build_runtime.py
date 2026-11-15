@@ -79,3 +79,33 @@ def test_runtime_alert_is_built_from_the_config():
     runtime.alert("boom")
 
     assert sent == [("tv", "boom")]
+
+
+@mock_aws
+def test_news_runs_on_tavily_alone_unless_grounding_is_switched_on():
+    from ags.handlers.runtime import news_client_from
+    from ags.tools.sources.combined_news import CombinedNewsClient
+
+    assert news_client_from({}, CONFIG) is None
+    assert news_client_from({"NEWS_GROUNDING": "off", "GEMINI_API_KEY": "g"}, CONFIG) is None
+    assert isinstance(news_client_from({"NEWS_GROUNDING": "on", "GEMINI_API_KEY": "g"}, CONFIG), CombinedNewsClient)
+    assert news_client_from({"NEWS_GROUNDING": "on", "GEMINI_API_KEY": "g"}, CONFIG)._grounded._blocking is False
+
+
+def test_the_midday_news_client_is_grounding_alone_and_only_when_switched_on():
+    from ags.handlers.runtime import midday_news_client_from
+    from ags.tools.sources.combined_news import GroundedNewsOnlyClient
+
+    assert midday_news_client_from({}) is None
+    assert midday_news_client_from({"NEWS_GROUNDING": "off", "GEMINI_API_KEY": "g"}) is None
+    client = midday_news_client_from({"NEWS_GROUNDING": "on", "GEMINI_API_KEY": "g"})
+    assert isinstance(client, GroundedNewsOnlyClient) and client._grounded._blocking is False
+
+
+def test_grounding_on_without_a_key_falls_back_to_tavily_alone_instead_of_failing_to_start():
+    from ags.handlers.runtime import midday_news_client_from, news_client_from
+
+    env = {"NEWS_GROUNDING": "on"}
+
+    assert news_client_from(env, CONFIG) is None
+    assert midday_news_client_from(env) is None
