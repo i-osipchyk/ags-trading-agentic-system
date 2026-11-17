@@ -11,7 +11,23 @@ instant (so nothing after it is used), as the bid, plus the symbol's median spre
 quotes. The bars are fetched once from cTrader (market data only, no orders) and cached under
 replays/{replay_id}/m5/.
 
+Sizers (`--sizer`): `conviction` is the deployed rule; `flat_hold` is long/short one lot on a
+bullish/bearish call and holds on neutral; `flat_exit` is the same but a neutral call closes the position.
+`risk_hold` / `risk_exit` are those two with the position sized to the full risk budget (1 ATR = SHADOW_RISK_BUDGET
+of equity, as conviction 5), so they differ from the deployed rule only in ignoring conviction.
+The flat sizers are a backtest only: they patch the stage in this process, nothing in src/ changes.
+
+`--trend short|medium` replaces every call with the technical analyst's logged trend state of that horizon
+(up = bullish, down = bearish, otherwise neutral; conviction 5, so the conviction sizer takes the full
+risk budget). It is the trend-only baseline through the same costs and guardrails.
+
+`--confirm N` holds each commodity's position direction until N consecutive opposite calls: the first
+directional call opens, a neutral or failed call neither flips nor counts, and an opposite call that is not
+confirmed yet is passed on as neutral (the guardrails then hold the leg). Applied to whichever calls are
+replayed (the logged ones, or `--trend`); the calls themselves are not changed on the official record.
+
 Usage: uv run python scripts/run_shadow_replay.py [--equity 100000] [--replay-id shadow-100k]
+                                                 [--sizer conviction|flat_hold|flat_exit|risk_hold|risk_exit]
 """
 
 import argparse
@@ -47,12 +63,16 @@ def _fetch_m5(cache: Path, start: datetime, end: datetime) -> dict[str, list[dic
     try:
         for c in COMMODITIES:
             path = cache / f"{c}.json"
-            if path.is_file():
-                bars[c] = json.loads(path.read_text())
-                continue
-            client = client or CTraderPricesClient(Config.from_env())
             out: dict[str, dict] = {}
             t = start
+            if path.is_file():
+                cached = json.loads(path.read_text())
+                if datetime.fromisoformat(cached[-1]["timestamp"]) >= end - timedelta(hours=12):
+                    bars[c] = cached
+                    continue
+                out = {b["timestamp"]: b for b in cached}  # top up the cache from its last bar
+                t = datetime.fromisoformat(cached[-1]["timestamp"])
+            client = client or CTraderPricesClient(Config.from_env())
             while t < end:
                 for bar in client.get_bars(CTRADER_SYMBOL_NAMES[c], "M5", t, min(t + _CHUNK, end)):
                     out[bar["timestamp"]] = bar
@@ -60,7 +80,7 @@ def _fetch_m5(cache: Path, start: datetime, end: datetime) -> dict[str, list[dic
             bars[c] = [out[k] for k in sorted(out)]
             cache.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(bars[c]))
-            print(f"fetched {len(bars[c])} M5 bars for {c}")
+            print(f"{len(bars[c])} M5 bars for {c}")
     finally:
         if client:
             client.close()
@@ -116,6 +136,78 @@ class _SyntheticQuotes:
     put_if_absent = put
 
 
+def _flat_sizer(exit_on_neutral: bool, risk_matched: bool = False):
+    """Patch the stage with a one-lot sizer, and (for exit_on_neutral) let a neutral call close the leg.
+
+    Guardrail 2 freezes a neutral leg, but a bullish call may end flat, so a neutral call reaches the
+    guardrails as bullish when the target is flat. Only the shadow book's guardrail call is affected
+    because the manager stub holds everything (a held leg is not a flat target).
+    """
+    from ags.portfolio import stage
+
+    def proposal(calls, book_state, risk, risk_budget):
+        legs = []
+        for symbol, held in book_state["lots"].items():
+            call = calls.get(symbol)
+            if call is None or "error" in risk[symbol] or (call["call"] == "neutral" and not exit_on_neutral):
+                delta = 0.0
+            else:
+                size = risk_budget * book_state["equity"] / risk[symbol]["atr_usd_per_lot"] if risk_matched else 1.0
+                target = {"bullish": size, "bearish": -size, "neutral": 0.0}[call["call"]]
+                delta = target - held
+            legs.append({"symbol": symbol, "delta_lots": delta, "rationale": "flat sizer"})
+        return {"legs": legs, "portfolio_note": "flat sizer"}
+
+    real_guardrails = stage.apply_guardrails
+
+    def guardrails(proposal_, book_state, calls, *args, **kwargs):
+        if exit_on_neutral and proposal_ and proposal_.get("portfolio_note") == "flat sizer":
+            calls = {s: ({**c, "call": "bullish"} if c and c["call"] == "neutral" else c) for s, c in calls.items()}
+        return real_guardrails(proposal_, book_state, calls, *args, **kwargs)
+
+    stage.shadow_proposal = proposal
+    stage.apply_guardrails = guardrails
+
+
+def _trend_calls(official_calls: dict, stamp: str, horizon: str) -> dict:
+    """The cycle's calls rebuilt from the logged technical trend state; failed commodities stay failed."""
+    out = {}
+    for c, call in official_calls.items():
+        trend = None
+        if call is not None:
+            for line in (ROOT / "logs" / f"{c}_{stamp}.jsonl").read_text().splitlines():
+                e = json.loads(line)
+                if e["agent"] == "technical" and e["event_type"] == "output":
+                    trend = e["payload"]["trend"][horizon]["state"]
+        out[c] = None if call is None or trend is None else {
+            **call, "call": {"up": "bullish", "down": "bearish"}.get(trend, "neutral"), "conviction": 5,
+        }
+    return out
+
+
+def _confirmed(records: dict[str, dict], n: int) -> None:
+    """Rewrite each cycle's calls so a direction flips only after `n` consecutive opposite calls."""
+    held: dict[str, str] = {}
+    streak: dict[str, int] = {}
+    for cycle_id in sorted(records):
+        calls = records[cycle_id]["calls"]
+        for c, call in calls.items():
+            if call is None or call["call"] == "neutral":
+                streak[c] = 0
+                continue
+            direction = call["call"]
+            if c not in held:
+                held[c], streak[c] = direction, 0
+            elif direction == held[c]:
+                streak[c] = 0
+            else:
+                streak[c] = streak.get(c, 0) + 1
+                if streak[c] >= n:
+                    held[c], streak[c] = direction, 0
+                else:
+                    calls[c] = {**call, "call": "neutral"}
+
+
 def _live_config() -> PortfolioConfig:
     """The deployed portfolio Lambda's limits; the documented defaults when AWS isn't reachable."""
     try:
@@ -132,8 +224,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Replay the shadow book from a flat account.")
     parser.add_argument("--equity", type=float, default=100_000)
     parser.add_argument("--replay-id", default="shadow-100k")
+    parser.add_argument("--confirm", type=int, default=0, help="flip a position only after N consecutive opposite calls")
+    parser.add_argument("--trend", choices=("short", "medium"))
+    parser.add_argument("--sizer", choices=("conviction", "flat_hold", "flat_exit", "risk_hold", "risk_exit"), default="conviction")
     args = parser.parse_args(argv)
     load_env(ROOT / ".env")
+    if args.sizer != "conviction":
+        _flat_sizer(exit_on_neutral=args.sizer.endswith("_exit"), risk_matched=args.sizer.startswith("risk_"))
 
     official = LocalStorage(ROOT)
     out_dir = ROOT / "replays" / args.replay_id
@@ -145,6 +242,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     print(f"{len(cycles)} cycles, starting equity {args.equity:,.0f}")
     records = {c: json.loads(official.get(f"portfolio/shadow/cycles/{c}.json")) for c in cycles}
+    if args.trend:
+        for cycle_id, rec in records.items():
+            rec["calls"] = _trend_calls(rec["calls"], cycle_id.removeprefix("cycle_"), args.trend)
+    if args.confirm:
+        _confirmed(records, args.confirm)
     instants = sorted({
         datetime.fromisoformat(r[k]) for r in records.values() for k in ("quoted_at", "exec_quoted_at") if r.get(k)
     })
